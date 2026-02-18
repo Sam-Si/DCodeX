@@ -114,6 +114,8 @@ bazel-testlogs/
 .bazelrc.user
 # Bazel cache & temporary files
 /.cache/bazel
+# Bazel lockfile (for reproducible builds)
+MODULE.bazel.lock
 
 # -----------------------------------------------------------------------------
 # Docker / Build artifacts
