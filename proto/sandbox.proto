@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package dcodex;
+
+service CodeExecutor {
+  rpc Execute(CodeRequest) returns (stream ExecutionLog);
+}
+
+message CodeRequest {
+  string language = 1;
+  string code = 2;
+}
+
+message ExecutionLog {
+  string stdout_chunk = 1;
+  string stderr_chunk = 2;
+}
