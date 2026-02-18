@@ -39,3 +39,97 @@
 
 # debug information files
 *.dwo
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# Environment files
+.env
+.env.*
+
+# pip cache
+pip-log.txt
+pip-delete-this-directory.txt
+.cache/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Type checkers / linters
+.mypy_cache/
+.pyrightcache/
+.flake8
+
+# Editor and OS files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+.DS_Store
+
+# Dev container secrets (Keep the folder, ignore the local env!)
+.devcontainer/.env
+
+# Logs
+*.log
+
+# -----------------------------------------------------------------------------
+# Bazel
+# -----------------------------------------------------------------------------
+# Bazel creates directories like bazel-<workspace>, and output folders
+bazel-*
+# Common bazel output dirs
+bazel-out/
+bazel-bin/
+bazel-genfiles/
+bazel-testlogs/
+# Bazel local state / output base
+.output_base
+# Workspace-specific symlink(s)
+**/bazel-*
+# Bazel user config
+.bazelrc.user
+# Bazel cache & temporary files
+/.cache/bazel
+
+# -----------------------------------------------------------------------------
+# Docker / Build artifacts
+# -----------------------------------------------------------------------------
+# Ignore local overrides, but track the main docker-compose.yml
+docker-compose.override.yml
+*.tar
+
+# -----------------------------------------------------------------------------
+# Misc / platform specific
+# -----------------------------------------------------------------------------
+*.pyc
+*.pyo
+*.pyd
+*.class
+
+# Keep generated protobuf/class artifacts out
+*_pb2.py
+*_pb2_grpc.py
