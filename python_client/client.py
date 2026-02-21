@@ -11,7 +11,7 @@ import proto.sandbox_pb2_grpc as sandbox_pb2_grpc
 
 def run_example(language="cpp"):
     # Connect to the server
-    channel = grpc.insecure_channel('localhost:50051')
+    channel = grpc.insecure_channel('localhost:50052')
     stub = sandbox_pb2_grpc.CodeExecutorStub(channel)
 
     if language == "cpp":
