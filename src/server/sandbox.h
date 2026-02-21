@@ -1,25 +1,42 @@
 #pragma once
 
+#include "src/server/process.h"
 #include <string>
-#include <vector>
-#include <functional>
+#include <memory>
+#include <map>
 
 namespace dcodex {
 
-class SandboxedProcess {
+class LanguageStrategy {
 public:
-    struct Result {
-        bool success;
-        std::string error_message;
-    };
+    virtual ~LanguageStrategy() = default;
+    virtual std::string GetExtension() const = 0;
+    virtual ExecutionResult Compile(const std::string& source_path, const std::string& binary_path, Process::OutputCallback callback) = 0;
+    virtual ExecutionResult Run(const std::string& binary_path, Process::OutputCallback callback, const ResourceLimits& limits) = 0;
+};
 
-    using OutputCallback = std::function<void(const std::string& stdout_chunk, const std::string& stderr_chunk)>;
+class CppStrategy : public LanguageStrategy {
+public:
+    std::string GetExtension() const override { return ".cpp"; }
+    ExecutionResult Compile(const std::string& source_path, const std::string& binary_path, Process::OutputCallback callback) override;
+    ExecutionResult Run(const std::string& binary_path, Process::OutputCallback callback, const ResourceLimits& limits) override;
+};
 
-    static Result CompileAndRunStreaming(const std::string& code, OutputCallback callback);
+class PythonStrategy : public LanguageStrategy {
+public:
+    std::string GetExtension() const override { return ".py"; }
+    ExecutionResult Compile(const std::string& source_path, const std::string& binary_path, Process::OutputCallback callback) override;
+    ExecutionResult Run(const std::string& binary_path, Process::OutputCallback callback, const ResourceLimits& limits) override;
+};
+
+class Sandbox {
+public:
+    using OutputCallback = Process::OutputCallback;
+
+    static ExecutionResult Execute(const std::string& language, const std::string& code, OutputCallback callback);
 
 private:
-    static std::string WriteTempFile(const std::string& extension, const std::string& content);
-    static Result ExecuteCommandStreaming(const std::vector<std::string>& argv, OutputCallback callback, bool sandboxed = false);
+    static std::unique_ptr<LanguageStrategy> GetStrategy(const std::string& language);
 };
 
 } // namespace dcodex
