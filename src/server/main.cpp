@@ -44,7 +44,7 @@ public:
         class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
         public:
             ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter) 
-                : request_(request), finished_(false), writing_(false), counter_(counter) {
+                : request_(request), finished_(false), writing_(false), counter_(counter), cache_hit_(false) {
                 worker_thread_ = std::thread([this]() {
                     auto result = SandboxedProcess::CompileAndRunStreaming(request_->code(), 
                         [this](const std::string& stdout_chunk, const std::string& stderr_chunk) {
@@ -58,6 +58,7 @@ public:
                     
                     // Store resource stats for final log
                     stats_ = result.stats;
+                    cache_hit_ = result.cache_hit;
                     
                     std::lock_guard<std::mutex> lock(mutex_);
                     finished_ = true;
@@ -103,6 +104,7 @@ public:
                     ExecutionLog stats_log;
                     stats_log.set_peak_memory_bytes(stats_.peak_memory_bytes);
                     stats_log.set_execution_time_ms(static_cast<float>(stats_.elapsed_time_ms));
+                    stats_log.set_cache_hit(cache_hit_);
                     current_log_ = stats_log;
                     StartWrite(&current_log_);
                 } else if (finished_ && stats_sent_) {
@@ -118,6 +120,7 @@ public:
             bool finished_;
             bool writing_;
             bool stats_sent_ = false;
+            bool cache_hit_;
             SandboxedProcess::ResourceStats stats_;
             std::atomic<int>& counter_;
         };

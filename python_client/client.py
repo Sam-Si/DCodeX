@@ -62,6 +62,7 @@ int main() {
         responses = stub.Execute(request)
         peak_memory = 0
         execution_time = 0
+        cache_hit = False
         
         for response in responses:
             if response.stdout_chunk:
@@ -73,11 +74,14 @@ int main() {
                 peak_memory = response.peak_memory_bytes
             if response.execution_time_ms > 0:
                 execution_time = response.execution_time_ms
+            cache_hit = response.cache_hit
         
         print("-" * 50)
         print("📊 Resource Usage Summary:")
         print(f"   💾 Peak Memory: {format_bytes(peak_memory)}")
         print(f"   ⏱️  Execution Time: {format_duration(execution_time)}")
+        cache_status = "⚡ CACHE HIT" if cache_hit else "🆕 Fresh Execution"
+        print(f"   {cache_status}")
         print("-" * 50)
     except grpc.RpcError as e:
         print(f"RPC failed: {e}")
@@ -108,6 +112,7 @@ int main() {
         responses = stub.Execute(request)
         peak_memory = 0
         execution_time = 0
+        cache_hit = False
         
         for response in responses:
             if response.stdout_chunk:
@@ -118,11 +123,14 @@ int main() {
                 peak_memory = response.peak_memory_bytes
             if response.execution_time_ms > 0:
                 execution_time = response.execution_time_ms
+            cache_hit = response.cache_hit
         
         print("-" * 50)
         print("📊 Resource Usage Summary:")
         print(f"   💾 Peak Memory: {format_bytes(peak_memory)}")
         print(f"   ⏱️  Execution Time: {format_duration(execution_time)}")
+        cache_status = "⚡ CACHE HIT" if cache_hit else "🆕 Fresh Execution"
+        print(f"   {cache_status}")
         print("=" * 50)
     except grpc.RpcError as e:
         print(f"RPC failed: {e}")
@@ -156,6 +164,7 @@ int main() {
         responses = stub.Execute(request)
         peak_memory = 0
         execution_time = 0
+        cache_hit = False
         
         for response in responses:
             if response.stdout_chunk:
@@ -166,11 +175,14 @@ int main() {
                 peak_memory = response.peak_memory_bytes
             if response.execution_time_ms > 0:
                 execution_time = response.execution_time_ms
+            cache_hit = response.cache_hit
         
         print("-" * 50)
         print("📊 Resource Usage Summary:")
         print(f"   💾 Peak Memory: {format_bytes(peak_memory)}")
         print(f"   ⏱️  Execution Time: {format_duration(execution_time)}")
+        cache_status = "⚡ CACHE HIT" if cache_hit else "🆕 Fresh Execution"
+        print(f"   {cache_status}")
         print("=" * 50)
     except grpc.RpcError as e:
         print(f"RPC failed: {e}")
@@ -205,6 +217,7 @@ int main() {
         responses = stub.Execute(request)
         peak_memory = 0
         execution_time = 0
+        cache_hit = False
         
         for response in responses:
             if response.stdout_chunk:
@@ -215,11 +228,14 @@ int main() {
                 peak_memory = response.peak_memory_bytes
             if response.execution_time_ms > 0:
                 execution_time = response.execution_time_ms
+            cache_hit = response.cache_hit
         
         print("-" * 50)
         print("📊 Resource Usage Summary:")
         print(f"   💾 Peak Memory: {format_bytes(peak_memory)}")
         print(f"   ⏱️  Execution Time: {format_duration(execution_time)}")
+        cache_status = "⚡ CACHE HIT" if cache_hit else "🆕 Fresh Execution"
+        print(f"   {cache_status}")
         print("=" * 50)
     except grpc.RpcError as e:
         print(f"RPC failed: {e}")

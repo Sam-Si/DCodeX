@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -13,12 +14,122 @@
 
 namespace dcodex {
 
-SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(const std::string& code, OutputCallback callback) {
+namespace {
+
+// Global cache instance
+class CacheHolder {
+public:
+    static ExecutionCache& Get() {
+        static ExecutionCache cache;
+        return cache;
+    }
+};
+
+// Buffer to capture output for caching
+class OutputBuffer {
+public:
+    void AppendStdout(const std::string& data) {
+        stdout_ += data;
+    }
+    
+    void AppendStderr(const std::string& data) {
+        stderr_ += data;
+    }
+    
+    const std::string& GetStdout() const { return stdout_; }
+    const std::string& GetStderr() const { return stderr_; }
+    
+private:
+    std::string stdout_;
+    std::string stderr_;
+};
+
+}  // namespace
+
+ExecutionCache& SandboxedProcess::GetCache() {
+    return CacheHolder::Get();
+}
+
+void SandboxedProcess::ClearCache() {
+    CacheHolder::Get().Clear();
+}
+
+SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(
+    const std::string& code, OutputCallback callback) {
+    
+    // Compute hash of the code
+    std::string code_hash = ExecutionCache::ComputeHash(code);
+    if (code_hash.empty()) {
+        // Hash computation failed, execute without caching
+        return ExecuteWithoutCache(code, callback);
+    }
+    
+    // Check cache first
+    auto cached = GetCache().Get(code_hash);
+    if (cached != nullptr) {
+        // Cache hit - replay the output
+        if (!cached->stdout_output.empty()) {
+            callback(cached->stdout_output, "");
+        }
+        if (!cached->stderr_output.empty()) {
+            callback("", cached->stderr_output);
+        }
+        
+        Result result;
+        result.success = cached->success;
+        result.error_message = cached->error_message;
+        result.cache_hit = true;
+        result.cached_stdout = cached->stdout_output;
+        result.cached_stderr = cached->stderr_output;
+        result.stats.peak_memory_bytes = cached->peak_memory_bytes;
+        result.stats.elapsed_time_ms = static_cast<long>(cached->execution_time_ms);
+        result.stats.user_time_ms = 0;
+        result.stats.system_time_ms = 0;
+        return result;
+    }
+    
+    // Cache miss - execute and store result
+    OutputBuffer buffer;
+    
+    auto wrapping_callback = [&callback, &buffer](const std::string& stdout_chunk, 
+                                                   const std::string& stderr_chunk) {
+        if (!stdout_chunk.empty()) {
+            buffer.AppendStdout(stdout_chunk);
+            callback(stdout_chunk, "");
+        }
+        if (!stderr_chunk.empty()) {
+            buffer.AppendStderr(stderr_chunk);
+            callback("", stderr_chunk);
+        }
+    };
+    
+    Result result = ExecuteWithoutCache(code, wrapping_callback);
+    
+    // Store in cache if execution was successful
+    if (result.success) {
+        CachedResult cached_result;
+        cached_result.stdout_output = buffer.GetStdout();
+        cached_result.stderr_output = buffer.GetStderr();
+        cached_result.peak_memory_bytes = result.stats.peak_memory_bytes;
+        cached_result.execution_time_ms = static_cast<float>(result.stats.elapsed_time_ms);
+        cached_result.success = result.success;
+        cached_result.error_message = result.error_message;
+        
+        GetCache().Put(code_hash, cached_result);
+    }
+    
+    return result;
+}
+
+SandboxedProcess::Result SandboxedProcess::ExecuteWithoutCache(
+    const std::string& code, OutputCallback callback) {
+    
     std::string source_file = WriteTempFile(".cpp", code);
     std::string binary_file = source_file + ".bin";
 
     // Compilation step (not sandboxed, captures output via callback)
-    Result compile_result = ExecuteCommandStreaming({"g++", "-std=c++17", source_file, "-o", binary_file}, callback, false);
+    Result compile_result = ExecuteCommandStreaming(
+        {"g++", "-std=c++17", source_file, "-o", binary_file}, callback, false);
     if (!compile_result.success) {
         unlink(source_file.c_str());
         return compile_result;

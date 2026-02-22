@@ -9,6 +9,7 @@
 - **🛡️ Secure Sandboxing:** Leverages Linux `rlimit` to enforce strict CPU and memory constraints.
 - **⚡ Real-time Streaming:** Uses gRPC bi-directional streaming for instantaneous stdout/stderr feedback.
 - **📊 Resource Monitoring:** Tracks peak memory usage and execution time with human-readable formatting.
+- **💾 Smart Caching:** SHA256-based result caching eliminates redundant executions for identical code.
 - **🛠️ Bazel-Powered:** Reproducible, hermetic builds ensuring consistency across environments.
 - **🐍 Python Client:** Easy-to-use client for interacting with the execution engine.
 - **📈 Scalable:** Designed with a reactive, multi-threaded architecture to handle concurrent execution requests.
@@ -100,6 +101,62 @@ Computation complete! Result: 6.66667e+08
    💾 Peak Memory: 2.15 MB
    ⏱️  Execution Time: 234.56 ms
 ==================================================
+```
+
+---
+
+## 💾 Smart Caching
+
+DCodeX implements intelligent result caching to avoid redundant code executions:
+
+### How It Works
+
+1. **SHA256 Hashing:** Each code submission is hashed using SHA256
+2. **Cache Lookup:** If the hash exists in cache, the stored result is returned immediately
+3. **Cache Miss:** New code is executed, and successful results are stored for future use
+
+### Cache Features
+
+- **Thread-Safe:** Uses shared_mutex for concurrent read access
+- **LRU Eviction:** Least Recently Used entries are evicted when max capacity is reached
+- **TTL Support:** Entries expire after a configurable time (default: 1 hour)
+- **Memory Efficient:** Stores stdout, stderr, and resource metrics only
+
+### Cache Configuration
+
+Default settings in `execution_cache.h`:
+- **Max Entries:** 1000
+- **TTL:** 1 hour
+- **Hash Algorithm:** SHA256 (via OpenSSL)
+
+### Cache Indicators
+
+The Python client shows cache status in the output:
+
+```
+📊 Resource Usage Summary:
+   💾 Peak Memory: 2.15 MB
+   ⏱️  Execution Time: 234.56 ms
+   ⚡ CACHE HIT
+```
+
+Or for fresh executions:
+
+```
+📊 Resource Usage Summary:
+   💾 Peak Memory: 2.15 MB
+   ⏱️  Execution Time: 234.56 ms
+   🆕 Fresh Execution
+```
+
+### Programmatic Access
+
+```cpp
+// Clear the cache
+SandboxedProcess::ClearCache();
+
+// Access cache statistics
+size_t cache_size = SandboxedProcess::GetCache().Size();
 ```
 
 ---

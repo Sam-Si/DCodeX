@@ -17,4 +17,6 @@ message ExecutionLog {
   // Resource usage metrics
   int64 peak_memory_bytes = 3;
   float execution_time_ms = 4;
+  // Cache status
+  bool cache_hit = 5;
 }
