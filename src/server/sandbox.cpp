@@ -139,15 +139,19 @@ SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(const std::ve
         }
 
         int status;
-        waitpid(pid, &status, 0);
+        struct rusage usage;
+        // Use wait4 to get resource usage for this specific child process
+        pid_t result = wait4(pid, &status, 0, &usage);
+        
+        if (result == -1) {
+            close(stdout_pipe[0]);
+            close(stderr_pipe[0]);
+            return {false, "Failed to wait for child process", {}};
+        }
 
         // Record end time
         struct timeval end_time;
         gettimeofday(&end_time, nullptr);
-
-        // Get resource usage
-        struct rusage usage;
-        getrusage(RUSAGE_CHILDREN, &usage);
 
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
@@ -156,8 +160,12 @@ SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(const std::ve
         
         // Calculate resource stats
         ResourceStats stats;
-        // Peak memory in bytes (ru_maxrss is in KB on Linux)
-        stats.peak_memory_bytes = usage.ru_maxrss * 1024;
+        // Peak memory: ru_maxrss is in KB on Linux, bytes on macOS
+        #ifdef __APPLE__
+            stats.peak_memory_bytes = usage.ru_maxrss;
+        #else
+            stats.peak_memory_bytes = usage.ru_maxrss * 1024;
+        #endif
         // User time in milliseconds
         stats.user_time_ms = usage.ru_utime.tv_sec * 1000 + usage.ru_utime.tv_usec / 1000;
         // System time in milliseconds
