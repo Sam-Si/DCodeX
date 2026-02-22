@@ -1,116 +1,147 @@
 #include "src/server/sandbox.h"
-#include "src/server/logger.h"
-#include "src/server/process.h"
 
 #include <iostream>
-#include <filesystem>
-#include <map>
-#include <memory>
+#include <fstream>
+#include <vector>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include <sys/select.h>
+#include <fcntl.h>
+
 
 namespace dcodex {
 
-namespace fs = std::filesystem;
+SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(const std::string& code, OutputCallback callback) {
+    std::string source_file = WriteTempFile(".cpp", code);
+    std::string binary_file = source_file + ".bin";
 
-// --- C++ Strategy ---
-ExecutionResult CppStrategy::Compile(const std::string& source_path, const std::string& binary_path, Process::OutputCallback callback) {
-    Logger::Info("Compiling C++: ", source_path, " -> ", binary_path);
-    return Process::Run(
-        {"g++", "-std=c++17", source_path, "-o", binary_path}, 
-        callback, 
-        false // Not sandboxed for compilation
-    );
-}
-
-ExecutionResult CppStrategy::Run(const std::string& binary_path, Process::OutputCallback callback, const ResourceLimits& limits) {
-    Logger::Info("Running C++ Binary: ", binary_path);
-    return Process::Run(
-        {binary_path}, 
-        callback, 
-        true, // Sandboxed!
-        limits
-    );
-}
-
-// --- Python Strategy ---
-ExecutionResult PythonStrategy::Compile(const std::string& source_path, const std::string& binary_path, Process::OutputCallback callback) {
-    // Syntax check
-    Logger::Info("Checking Python syntax: ", source_path);
-    return Process::Run(
-        {"python3", "-m", "py_compile", source_path}, 
-        callback,
-        false
-    );
-}
-
-ExecutionResult PythonStrategy::Run(const std::string& binary_path, Process::OutputCallback callback, const ResourceLimits& limits) {
-    // binary_path here is actually the source path (see Sandbox::Execute logic below)
-    Logger::Info("Running Python Script: ", binary_path);
-    return Process::Run(
-        {"python3", binary_path}, 
-        callback, 
-        true, 
-        limits
-    );
-}
-
-// --- Sandbox ---
-
-std::unique_ptr<LanguageStrategy> Sandbox::GetStrategy(const std::string& language) {
-    if (language == "cpp") {
-        return std::make_unique<CppStrategy>();
-    } else if (language == "python") {
-        return std::make_unique<PythonStrategy>();
-    }
-    return nullptr;
-}
-
-ExecutionResult Sandbox::Execute(const std::string& language, const std::string& code, OutputCallback callback) {
-    auto strategy = GetStrategy(language);
-    if (!strategy) {
-        Logger::Error("Unsupported language: ", language);
-        return {false, -1, "Unsupported language: " + language};
-    }
-
-    std::string temp_dir = Process::CreateTempDirectory();
-    if (temp_dir.empty()) {
-        return {false, -1, "Failed to create temp directory"};
-    }
-
-    // Source file path
-    std::string source_path = temp_dir + "/Main" + strategy->GetExtension();
-    if (!Process::WriteFile(source_path, code)) {
-        Process::RemoveDirectory(temp_dir);
-        return {false, -1, "Failed to write source file"};
-    }
-
-    // Determine Binary/Run Path
-    std::string binary_path;
-    if (language == "cpp") {
-        binary_path = temp_dir + "/Main.bin";
-    } else {
-        // For interpreted languages, the "binary" to run is the source itself (or passed to interpreter)
-        binary_path = source_path;
-    }
-
-    // Compilation Step
-    ExecutionResult compile_result = strategy->Compile(source_path, binary_path, callback);
+    // Compilation step (not sandboxed, captures output via callback)
+    Result compile_result = ExecuteCommandStreaming({"g++", "-std=c++17", source_file, "-o", binary_file}, callback, false);
     if (!compile_result.success) {
-        Logger::Warn("Compilation failed for ", language);
-        Process::RemoveDirectory(temp_dir);
+        unlink(source_file.c_str());
         return compile_result;
     }
 
-    // Execution Step
-    ResourceLimits limits; // Default limits
-    // Use slightly tighter limits for untrusted code
-    limits.cpu_time_seconds = 5;
-    limits.memory_bytes = 100 * 1024 * 1024; // 100MB
-
-    ExecutionResult run_result = strategy->Run(binary_path, callback, limits);
+    // Execution step (sandboxed)
+    Result run_result = ExecuteCommandStreaming({binary_file}, callback, true);
 
     // Cleanup
-    Process::RemoveDirectory(temp_dir);
+    unlink(source_file.c_str());
+    unlink(binary_file.c_str());
+
     return run_result;
+}
+
+std::string SandboxedProcess::WriteTempFile(const std::string& extension, const std::string& content) {
+    char template_str[] = "/tmp/dcodex_XXXXXX";
+    int fd = mkstemp(template_str);
+    if (fd == -1) return "";
+    close(fd);
+
+    std::string path = std::string(template_str) + extension;
+    std::ofstream out(path);
+    out << content;
+    out.close();
+    return path;
+}
+
+SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(const std::vector<std::string>& argv, OutputCallback callback, bool sandboxed) {
+    int stdout_pipe[2];
+    int stderr_pipe[2];
+
+    if (pipe(stdout_pipe) == -1 || pipe(stderr_pipe) == -1) {
+        return {false, "Failed to create pipes"};
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        return {false, "Failed to fork"};
+    }
+
+    if (pid == 0) {
+        if (sandboxed) {
+            struct rlimit cpu_limit;
+            cpu_limit.rlim_cur = 2;
+            cpu_limit.rlim_max = 2;
+            setrlimit(RLIMIT_CPU, &cpu_limit);
+
+            struct rlimit mem_limit;
+            mem_limit.rlim_cur = 50 * 1024 * 1024;
+            mem_limit.rlim_max = 50 * 1024 * 1024;
+            setrlimit(RLIMIT_AS, &mem_limit);
+        }
+
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[0]);
+        close(stderr_pipe[1]);
+
+        std::vector<char*> c_argv;
+        for (const auto& arg : argv) {
+            c_argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        c_argv.push_back(nullptr);
+
+        execvp(c_argv[0], c_argv.data());
+        exit(1);
+    } else {
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        char buffer[4096];
+        bool stdout_open = true;
+        bool stderr_open = true;
+
+        while (stdout_open || stderr_open) {
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            int max_fd = -1;
+
+            if (stdout_open) {
+                FD_SET(stdout_pipe[0], &read_fds);
+                max_fd = std::max(max_fd, stdout_pipe[0]);
+            }
+            if (stderr_open) {
+                FD_SET(stderr_pipe[0], &read_fds);
+                max_fd = std::max(max_fd, stderr_pipe[0]);
+            }
+
+            if (max_fd == -1) break;
+
+            int activity = select(max_fd + 1, &read_fds, nullptr, nullptr, nullptr);
+            if (activity < 0) break;
+
+            if (stdout_open && FD_ISSET(stdout_pipe[0], &read_fds)) {
+                ssize_t bytes = read(stdout_pipe[0], buffer, sizeof(buffer));
+                if (bytes > 0) {
+                    callback(std::string(buffer, bytes), "");
+                } else {
+                    stdout_open = false;
+                }
+            }
+            if (stderr_open && FD_ISSET(stderr_pipe[0], &read_fds)) {
+                ssize_t bytes = read(stderr_pipe[0], buffer, sizeof(buffer));
+                if (bytes > 0) {
+                    callback("", std::string(buffer, bytes));
+                } else {
+                    stderr_open = false;
+                }
+            }
+        }
+
+        int status;
+        waitpid(pid, &status, 0);
+
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+
+        bool success = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        return {success, success ? "" : "Process exited with non-zero status"};
+    }
 }
 
 } // namespace dcodex

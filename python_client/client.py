@@ -9,28 +9,28 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import proto.sandbox_pb2 as sandbox_pb2
 import proto.sandbox_pb2_grpc as sandbox_pb2_grpc
 
-def run_example(language="cpp"):
+def run():
     # Connect to the server
-    channel = grpc.insecure_channel('localhost:50052')
+    channel = grpc.insecure_channel('localhost:50051')
     stub = sandbox_pb2_grpc.CodeExecutorStub(channel)
 
-    if language == "cpp":
-        code = """
+    # C++ snippet with an infinite loop
+    code = """
 #include <iostream>
+#include <unistd.h>
+
 int main() {
-    std::cout << "Hello from C++ in DCodeX!" << std::endl;
+    std::cout << "Starting infinite loop..." << std::endl;
+    while(true) {
+        // Just loop
+    }
     return 0;
 }
 """
-    elif language == "python":
-        code = "print('Hello from Python in DCodeX!')"
-    else:
-        print(f"Unsupported language: {language}")
-        return
 
-    request = sandbox_pb2.CodeRequest(language=language, code=code)
+    request = sandbox_pb2.CodeRequest(language="cpp", code=code)
 
-    print(f"Sending {language} request to server...")
+    print("Sending request to server...")
     try:
         # Execute the code and stream logs
         responses = stub.Execute(request)
@@ -43,8 +43,4 @@ int main() {
         print(f"RPC failed: {e}")
 
 if __name__ == '__main__':
-    # Run C++ example
-    run_example("cpp")
-    print("-" * 30)
-    # Run Python example
-    run_example("python")
+    run()

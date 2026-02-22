@@ -1,14 +1,29 @@
-# Global options
+# General C++ settings
 build --cxxopt=-std=c++17
-common --enable_platform_specific_config
+build --cxxopt=-faligned-allocation
 
-# macOS specific options
-build:macos --cxxopt=-faligned-allocation
-build:macos --cxxopt=-mmacosx-version-min=10.15
-build:macos --linkopt=-mmacosx-version-min=10.15
-build:macos --apple_generate_dsym
-build:macos --action_env=MACOSX_DEPLOYMENT_TARGET=10.15
+# Persistence & Cache
+# We use a path that can be easily overridden or defaulted.
+# Inside Docker, we will set BAZEL_CACHE_ROOT=/bazel_cache
+common --repository_cache=~/.bazel_cache/repository
+build --disk_cache=~/.bazel_cache/disk
 
-# Linux (Debian/Ubuntu) specific options
-build:linux --cxxopt=-Wall
-build:linux --linkopt=-lstdc++fs
+# M1 (Apple Silicon) Host Optimizations
+# Use with: bazel build --config=m1 ...
+build:m1 --cpu=darwin_arm64
+build:m1 --macos_cpus=arm64
+
+# Execution Speed Optimizations (Works on both Mac and Linux)
+build --jobs=auto
+build --reuse_sandbox_directories
+build --experimental_inmemory_dotd_files
+build --experimental_inmemory_jdeps_files
+build --remote_cache_compression
+
+# Speed up by disabling dSYM generation by default
+build --apple_generate_dsym=false
+
+# UI & Logging
+common --announce_rc
+common --color=yes
+common --show_progress_rate_limit=0
