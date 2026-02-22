@@ -8,14 +8,25 @@ namespace dcodex {
 
 namespace {
 
-// Convert bytes to hex string
-std::string BytesToHex(const unsigned char* data, size_t len) {
+// FNV-1a hash constants
+constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
+constexpr uint64_t kFnvPrime = 1099511628211ULL;
+
+// Convert 64-bit hash to hex string
+std::string HashToHex(uint64_t hash) {
   std::stringstream ss;
-  ss << std::hex << std::setfill('0');
-  for (size_t i = 0; i < len; ++i) {
-    ss << std::setw(2) << static_cast<int>(data[i]);
-  }
+  ss << std::hex << std::setfill('0') << std::setw(16) << hash;
   return ss.str();
+}
+
+// Simple FNV-1a hash function - fast and good distribution
+uint64_t Fnv1aHash(const std::string& data) {
+  uint64_t hash = kFnvOffsetBasis;
+  for (unsigned char c : data) {
+    hash ^= static_cast<uint64_t>(c);
+    hash *= kFnvPrime;
+  }
+  return hash;
 }
 
 }  // namespace
@@ -71,32 +82,8 @@ void ExecutionCache::Put(const std::string& code_hash,
 }
 
 std::string ExecutionCache::ComputeHash(const std::string& code) {
-  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-  if (!ctx) {
-    return "";
-  }
-
-  if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
-    EVP_MD_CTX_free(ctx);
-    return "";
-  }
-
-  if (EVP_DigestUpdate(ctx, code.data(), code.size()) != 1) {
-    EVP_MD_CTX_free(ctx);
-    return "";
-  }
-
-  unsigned char hash[EVP_MAX_MD_SIZE];
-  unsigned int hash_len = 0;
-
-  if (EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
-    EVP_MD_CTX_free(ctx);
-    return "";
-  }
-
-  EVP_MD_CTX_free(ctx);
-
-  return BytesToHex(hash, hash_len);
+  uint64_t hash = Fnv1aHash(code);
+  return HashToHex(hash);
 }
 
 void ExecutionCache::CleanupExpired() {

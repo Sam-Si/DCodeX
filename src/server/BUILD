@@ -4,7 +4,6 @@ cc_library(
     name = "execution_cache",
     srcs = ["execution_cache.cpp"],
     hdrs = ["execution_cache.h"],
-    linkopts = ["-lcrypto"],
     visibility = ["//visibility:public"],
 )
 

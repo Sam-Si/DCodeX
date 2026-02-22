@@ -1,8 +1,7 @@
 #pragma once
 
-#include <openssl/evp.h>
-
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -47,7 +46,7 @@ class ExecutionCache {
   void Put(const std::string& code_hash,
            const CachedResult& result);
 
-  // Compute SHA256 hash of code
+  // Compute hash of code using FNV-1a algorithm
   static std::string ComputeHash(const std::string& code);
 
   // Clear all expired entries
