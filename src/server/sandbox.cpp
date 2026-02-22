@@ -8,6 +8,7 @@
 #include <sys/resource.h>
 #include <sys/select.h>
 #include <fcntl.h>
+#include <sys/time.h>
 
 
 namespace dcodex {
@@ -51,12 +52,16 @@ SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(const std::ve
     int stderr_pipe[2];
 
     if (pipe(stdout_pipe) == -1 || pipe(stderr_pipe) == -1) {
-        return {false, "Failed to create pipes"};
+        return {false, "Failed to create pipes", {}};
     }
+
+    // Record start time
+    struct timeval start_time;
+    gettimeofday(&start_time, nullptr);
 
     pid_t pid = fork();
     if (pid == -1) {
-        return {false, "Failed to fork"};
+        return {false, "Failed to fork", {}};
     }
 
     if (pid == 0) {
@@ -136,11 +141,33 @@ SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(const std::ve
         int status;
         waitpid(pid, &status, 0);
 
+        // Record end time
+        struct timeval end_time;
+        gettimeofday(&end_time, nullptr);
+
+        // Get resource usage
+        struct rusage usage;
+        getrusage(RUSAGE_CHILDREN, &usage);
+
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
 
         bool success = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        return {success, success ? "" : "Process exited with non-zero status"};
+        
+        // Calculate resource stats
+        ResourceStats stats;
+        // Peak memory in bytes (ru_maxrss is in KB on Linux)
+        stats.peak_memory_bytes = usage.ru_maxrss * 1024;
+        // User time in milliseconds
+        stats.user_time_ms = usage.ru_utime.tv_sec * 1000 + usage.ru_utime.tv_usec / 1000;
+        // System time in milliseconds
+        stats.system_time_ms = usage.ru_stime.tv_sec * 1000 + usage.ru_stime.tv_usec / 1000;
+        // Elapsed time in milliseconds
+        long elapsed_sec = end_time.tv_sec - start_time.tv_sec;
+        long elapsed_usec = end_time.tv_usec - start_time.tv_usec;
+        stats.elapsed_time_ms = elapsed_sec * 1000 + elapsed_usec / 1000;
+
+        return {success, success ? "" : "Process exited with non-zero status", stats};
     }
 }
 

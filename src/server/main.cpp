@@ -5,6 +5,8 @@
 #include <queue>
 #include <mutex>
 #include <atomic>
+#include <sstream>
+#include <iomanip>
 
 #include <grpcpp/grpcpp.h>
 #include "proto/sandbox.grpc.pb.h"
@@ -44,7 +46,7 @@ public:
             ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter) 
                 : request_(request), finished_(false), writing_(false), counter_(counter) {
                 worker_thread_ = std::thread([this]() {
-                    SandboxedProcess::CompileAndRunStreaming(request_->code(), 
+                    auto result = SandboxedProcess::CompileAndRunStreaming(request_->code(), 
                         [this](const std::string& stdout_chunk, const std::string& stderr_chunk) {
                             std::lock_guard<std::mutex> lock(mutex_);
                             ExecutionLog log;
@@ -53,6 +55,9 @@ public:
                             queue_.push(log);
                             MaybeWriteNext();
                         });
+                    
+                    // Store resource stats for final log
+                    stats_ = result.stats;
                     
                     std::lock_guard<std::mutex> lock(mutex_);
                     finished_ = true;
@@ -91,7 +96,16 @@ public:
                     current_log_ = queue_.front();
                     queue_.pop();
                     StartWrite(&current_log_);
-                } else if (finished_) {
+                } else if (finished_ && !stats_sent_) {
+                    // Send resource stats as the final log
+                    writing_ = true;
+                    stats_sent_ = true;
+                    ExecutionLog stats_log;
+                    stats_log.set_peak_memory_bytes(stats_.peak_memory_bytes);
+                    stats_log.set_execution_time_ms(static_cast<float>(stats_.elapsed_time_ms));
+                    current_log_ = stats_log;
+                    StartWrite(&current_log_);
+                } else if (finished_ && stats_sent_) {
                     Finish(Status::OK);
                 }
             }
@@ -103,6 +117,8 @@ public:
             ExecutionLog current_log_;
             bool finished_;
             bool writing_;
+            bool stats_sent_ = false;
+            SandboxedProcess::ResourceStats stats_;
             std::atomic<int>& counter_;
         };
 

@@ -14,4 +14,7 @@ message CodeRequest {
 message ExecutionLog {
   string stdout_chunk = 1;
   string stderr_chunk = 2;
+  // Resource usage metrics
+  int64 peak_memory_bytes = 3;
+  float execution_time_ms = 4;
 }

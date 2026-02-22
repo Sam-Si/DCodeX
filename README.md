@@ -1,6 +1,6 @@
 # 🚀 DCodeX
 
-**DCodeX** is a high-performance, gRPC-powered code execution engine designed for secure and scalable sandboxing. Built with C++ and Bazel, it provides a robust infrastructure for executing untrusted code with fine-grained resource control and real-time streaming feedback.
+**DCodeX** is a high-performance, gRPC-powered code execution engine designed for secure and scalable sandboxing. Built with C++ and Bazel, it provides a robust infrastructure for executing untrusted code with fine-grained resource control, real-time streaming feedback, and detailed resource usage metrics.
 
 ---
 
@@ -8,6 +8,7 @@
 
 - **🛡️ Secure Sandboxing:** Leverages Linux `rlimit` to enforce strict CPU and memory constraints.
 - **⚡ Real-time Streaming:** Uses gRPC bi-directional streaming for instantaneous stdout/stderr feedback.
+- **📊 Resource Monitoring:** Tracks peak memory usage and execution time with human-readable formatting.
 - **🛠️ Bazel-Powered:** Reproducible, hermetic builds ensuring consistency across environments.
 - **🐍 Python Client:** Easy-to-use client for interacting with the execution engine.
 - **📈 Scalable:** Designed with a reactive, multi-threaded architecture to handle concurrent execution requests.
@@ -18,8 +19,8 @@
 
 DCodeX consists of two main components:
 
-1.  **The Server (C++):** A gRPC server that manages a pool of sandboxed processes. It handles code compilation, execution, and resource monitoring.
-2.  **The Client (Python):** A reference implementation demonstrating how to stream code execution requests and receive live updates.
+1.  **The Server (C++):** A gRPC server that manages a pool of sandboxed processes. It handles code compilation, execution, and resource monitoring using `getrusage()` for accurate metrics.
+2.  **The Client (Python):** A reference implementation demonstrating how to stream code execution requests and receive live updates, including resource usage summaries.
 
 ---
 
@@ -67,6 +68,38 @@ Then, execute the sample client:
 
 ```bash
 python python_client/client.py
+```
+
+---
+
+## 📊 Resource Monitoring
+
+DCodeX now provides detailed resource usage metrics for every code execution:
+
+### Metrics Tracked
+
+- **Peak Memory Usage:** Maximum resident set size (RSS) consumed by the process during execution
+- **Execution Time:** Total elapsed time from process start to completion
+
+### Human-Readable Format
+
+The Python client automatically formats resource metrics for easy reading:
+
+- **Memory:** Bytes → KB → MB → GB (e.g., "2.45 MB")
+- **Time:** Milliseconds → Seconds → Minutes (e.g., "1.23 s" or "2m 15.50s")
+
+### Example Output
+
+```
+📝 Example: CPU-intensive Computation
+==================================================
+Starting computation...
+Computation complete! Result: 6.66667e+08
+--------------------------------------------------
+📊 Resource Usage Summary:
+   💾 Peak Memory: 2.15 MB
+   ⏱️  Execution Time: 234.56 ms
+==================================================
 ```
 
 ---
