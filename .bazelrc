@@ -1,29 +1,41 @@
-# General C++ settings
-build --cxxopt=-std=c++17
-build --cxxopt=-faligned-allocation
+# --- STARTUP OPTIONS ---
+# M1 Max Performance: Ensure the Bazel server stays alive longer to avoid JVM restarts
+startup --max_idle_secs=10800
+# JVM tuning: Apple Silicon likes more heap. M1 Max has at least 32GB, so 8GB for Bazel is safe.
+startup --host_jvm_args=-Xmx8g
 
-# Persistence & Cache
-# We use a path that can be easily overridden or defaulted.
-# Inside Docker, we will set BAZEL_CACHE_ROOT=/bazel_cache
-common --repository_cache=~/.bazel_cache/repository
-build --disk_cache=~/.bazel_cache/disk
-
-# M1 (Apple Silicon) Host Optimizations
-# Use with: bazel build --config=m1 ...
-build:m1 --cpu=darwin_arm64
-build:m1 --macos_cpus=arm64
-
-# Execution Speed Optimizations (Works on both Mac and Linux)
-build --jobs=auto
-build --reuse_sandbox_directories
-build --experimental_inmemory_dotd_files
-build --experimental_inmemory_jdeps_files
-build --remote_cache_compression
-
-# Speed up by disabling dSYM generation by default
-build --apple_generate_dsym=false
-
-# UI & Logging
+# --- COMMON OPTIONS ---
 common --announce_rc
 common --color=yes
-common --show_progress_rate_limit=0
+# Hermeticity & Cache hits
+common --incompatible_strict_action_env
+
+# --- CACHE SETTINGS ---
+common --repository_cache=~/Library/Caches/.bazel/repository
+build --disk_cache=~/Library/Caches/.bazel/disk
+
+# --- BUILD OPTIONS ---
+# Critical for modern C++ features on macOS
+build --macos_minimum_os=15.0
+build --cxxopt=-std=c++17
+build --cpu=darwin_arm64
+build --macos_cpus=arm64
+
+# --- PARALLELISM & EXECUTION ---
+# M1 Max has 10 cores. Bazel 'auto' is good.
+build --jobs=auto
+# Speeds up runfiles creation on macOS
+build --nolegacy_external_runfiles
+# Reuses sandbox directories to avoid costly deletions/creations on the SSD
+build --reuse_sandbox_directories
+# Skips debug symbols to speed up linking
+build --apple_generate_dsym=false
+
+# --- ADVANCED PERFORMANCE ---
+# Optimization levels
+build --copt=-O3
+build:opt --compilation_mode=opt
+
+# --- WATCHER ---
+# Uses macOS FSEvents to monitor file changes instead of scanning the whole tree
+common --watchfs
