@@ -1,0 +1,41 @@
+# --- STARTUP OPTIONS ---
+# M1 Max Performance: Ensure the Bazel server stays alive longer to avoid JVM restarts
+startup --max_idle_secs=10800
+# JVM tuning: Apple Silicon likes more heap. M1 Max has at least 32GB, so 8GB for Bazel is safe.
+startup --host_jvm_args=-Xmx8g
+
+# --- COMMON OPTIONS ---
+common --announce_rc
+common --color=yes
+# Hermeticity & Cache hits
+common --incompatible_strict_action_env
+
+# --- CACHE SETTINGS ---
+common --repository_cache=~/Library/Caches/.bazel/repository
+build --disk_cache=~/Library/Caches/.bazel/disk
+
+# --- BUILD OPTIONS ---
+# Critical for modern C++ features on macOS
+build --macos_minimum_os=15.0
+build --cxxopt=-std=c++17
+build --cpu=darwin_arm64
+build --macos_cpus=arm64
+
+# --- PARALLELISM & EXECUTION ---
+# M1 Max has 10 cores. Bazel 'auto' is good.
+build --jobs=auto
+# Speeds up runfiles creation on macOS
+build --nolegacy_external_runfiles
+# Reuses sandbox directories to avoid costly deletions/creations on the SSD
+build --reuse_sandbox_directories
+# Skips debug symbols to speed up linking
+build --apple_generate_dsym=false
+
+# --- ADVANCED PERFORMANCE ---
+# Optimization levels
+build --copt=-O3
+build:opt --compilation_mode=opt
+
+# --- WATCHER ---
+# Uses macOS FSEvents to monitor file changes instead of scanning the whole tree
+common --watchfs
