@@ -1,0 +1,157 @@
+name: Linux CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up LLVM 19
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg ca-certificates
+        sudo mkdir -p /usr/share/keyrings
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+        sudo apt-get update
+        sudo apt-get install -y clang-19 lld-19 libclang-rt-19-dev
+        sudo ln -sf /usr/bin/clang-19 /usr/bin/clang
+        sudo ln -sf /usr/bin/clang++-19 /usr/bin/clang++
+        sudo ln -sf /usr/bin/lld-19 /usr/bin/lld
+
+    - name: Install grpcurl
+      run: |
+        curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.3/grpcurl_1.9.3_linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin grpcurl
+        sudo chmod +x /usr/local/bin/grpcurl
+
+    - name: Cache Bazel
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/bazel
+        key: ${{ runner.os }}-bazel-${{ hashFiles('**/MODULE.bazel', '**/WORKSPACE', '**/WORKSPACE.bazel') }}
+        restore-keys: |
+          ${{ runner.os }}-bazel-
+
+    # ── Environment Verification ─────────────────────────────────────
+    # Runs the full dcodex-setup.sh --test to verify the environment is
+    # correctly configured and all sanitizer suites pass. This catches
+    # setup-level issues (missing deps, broken symlinks) that individual
+    # test steps wouldn't detect.
+    - name: "🔧 Environment Verification (dcodex-setup.sh --test)"
+      run: |
+        chmod +x ./dcodex-setup.sh
+        sudo REPO_DIR="$GITHUB_WORKSPACE" \
+             BAZEL_JOBS=4 \
+             BAZEL_MEM_MB=2048 \
+             SKIP_APT=0 \
+             ./dcodex-setup.sh --test
+      env:
+        DEBIAN_FRONTEND: noninteractive
+
+    # The dcodex-setup.sh runs as root (sudo), creating .bazel/output_base
+    # and /tmp/bazel-test-logs (via .bazelrc --test_tmpdir) owned by root.
+    # Subsequent Bazel steps run as the runner user and need read/write access.
+    - name: Fix root-owned directory permissions
+      run: |
+        sudo chown -R "$(id -u):$(id -g)" .bazel
+        sudo chown -R "$(id -u):$(id -g)" /tmp/bazel-test-logs 2>/dev/null || true
+
+    # ── Fine-grained Test Steps ──────────────────────────────────────
+    # These provide per-sanitizer visibility in the GitHub Actions UI.
+    # The dcodex-setup.sh step above is the single source of truth;
+    # these are redundant-but-visible steps for PR review ergonomics.
+
+    - name: Bazel Build
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc build \
+          --verbose_failures \
+          //...
+
+    - name: Bazel Test (Standard)
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc test \
+          --verbose_failures \
+          //...
+
+    - name: Bazel Test (ASan + UBSan)
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc test \
+          --config=asan \
+          --verbose_failures \
+          --jobs=2 \
+          //src/engine:sandbox_test \
+          //src/engine:warm_worker_pool_test \
+          //src/engine:dynamic_worker_coordinator_test \
+          //src/engine:tsan_checker
+
+    - name: Bazel Test (TSan — concurrency tests)
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
+          --verbose_failures \
+          --jobs=2 \
+          --test_tag_filters=-no-sandbox-tsan \
+          //...
+
+    - name: Bazel Test (TSan — Sandbox, constrained)
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
+          --verbose_failures \
+          //src/engine:sandbox_test \
+          --jobs=1 \
+          --runs_per_test=1 \
+          --local_test_jobs=1
+
+    - name: "🔬 TSan Proof-of-Detection"
+      run: |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  PROOF: Running deliberately buggy code under TSan."
+        echo "  TSan MUST detect the data race for this step to pass."
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        EXIT_CODE=0
+        bazel --bazelrc=.github/workflows/ci.bazelrc test \
+          --config=tsan \
+          --runs_per_test=1 \
+          --test_output=all \
+          //src/engine:tsan_proof_test > /tmp/tsan_proof_output.log 2>&1 || EXIT_CODE=$?
+
+        if [ "$EXIT_CODE" -eq 0 ]; then
+          echo "::error::❌ CRITICAL: TSan did NOT detect the deliberate data race!"
+          echo "::error::The sanitizer pipeline is BROKEN. Investigate immediately."
+          exit 1
+        fi
+
+        if grep -q "ThreadSanitizer" /tmp/tsan_proof_output.log; then
+          echo ""
+          echo "✅ ThreadSanitizer correctly detected the data race."
+          echo "   The sanitizer pipeline is verified and operational."
+          echo "   Your codebase is protected against concurrency bugs."
+        else
+          echo ""
+          echo "::error::Test failed but NOT due to TSan detection. Check logs:"
+          cat /tmp/tsan_proof_output.log
+          exit 1
+        fi
+
+    # MSan is intentionally excluded from CI. It requires ALL linked libraries
+    # (including libstdc++) to be compiled with MSan instrumentation. The system
+    # libstdc++ on GitHub runners is not instrumented, producing false positives
+    # in googletest before any DCodeX code even runs. To use MSan, build a
+    # custom toolchain with instrumented libc++ (see: https://clang.llvm.org/docs/MemorySanitizer.html#handling-external-code).
+
+    - name: Upload Test Logs on Failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: bazel-test-logs
+        path: |
+          bazel-testlogs/
+          /tmp/dcodex-test-*.log

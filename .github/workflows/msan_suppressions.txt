@@ -1,0 +1,11 @@
+# MSan suppressions for DCodeX
+# These ignore false positives from the non-instrumented system libstdc++
+# and googletest internals.
+
+# Ignore googletest internal message formatting
+interceptor_via_lib:libstdc++.so.6
+interceptor_via_fun:testing::Message::Message
+interceptor_via_fun:testing::internal::*
+
+# Ignore specific system library calls that touch uninstrumented memory
+interceptor_via_lib:libc.so.6

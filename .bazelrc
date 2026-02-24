@@ -1,0 +1,218 @@
+# ============================================================
+# DCodeX: Linux / Docker Native Built-In Config
+# Optimized for MAXIMUM ACCURACY AND CORRECTNESS
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. DYNAMIC GLOBAL CACHE
+# ------------------------------------------------------------
+startup --output_base=.bazel/output_base
+
+# ------------------------------------------------------------
+# 2. STARTUP: JVM & MEMORY
+# ------------------------------------------------------------
+startup --max_idle_secs=10800
+startup --host_jvm_args=-XX:+UseG1GC
+
+# ------------------------------------------------------------
+# 3. COMMON SETTINGS
+# ------------------------------------------------------------
+common --announce_rc
+common --color=yes
+common --incompatible_strict_action_env
+common --repository_cache=.bazel/repo_cache
+
+# Enable automatic platform-specific config (build:macos, build:linux, etc.)
+common --enable_platform_specific_config
+build --symlink_prefix=.bazel/
+
+# ------------------------------------------------------------
+# 4. DEFAULT PERFORMANCE (Accuracy & Correctness > Speed)
+# ------------------------------------------------------------
+build --compilation_mode=dbg
+build --copt=-O1
+build --copt=-g3
+build --per_file_copt=^src/.*@-Wall
+build --per_file_copt=^src/.*@-Wextra
+build --per_file_copt=^src/.*@-Werror
+build --per_file_copt=^src/.*@-Wthread-safety
+build --per_file_copt=^src/.*@-Wshadow
+build --per_file_copt=^src/.*@-Wconversion
+build --per_file_copt=^src/.*@-fcolor-diagnostics
+build --strip=never
+build --jobs=20
+build --local_resources=cpu=16
+build --local_resources=memory=57344
+
+# Linux Sandbox Hardening
+#   --sandbox_tmpfs_path=/tmp   : clean /tmp per action (isolation)
+#   --sandbox_writable_path=/dev: makes /dev (including /dev/null) available
+#       as a read-write bind mount inside the sandbox.  Bazel's test-setup.sh
+#       redirects to /dev/null and fails if it's read-only.
+#       NOTE: Do NOT also add --sandbox_add_mount_pair=/dev/null — it creates
+#       a separate read-only bind mount that overrides the writable /dev mount.
+#   NOTE: --sandbox_base CANNOT be under /tmp when --sandbox_tmpfs_path=/tmp
+#   is set — the tmpfs mount would wipe out the sandbox working directory.
+#   Stale sandbox state is purged by dcodex-setup.sh between suites.
+build:linux --sandbox_tmpfs_path=/tmp
+build:linux --sandbox_writable_path=/dev
+build:linux --dynamic_mode=off
+build:linux --linkopt=-Wl,--threads=16
+
+# ------------------------------------------------------------
+# 5. SANDBOXING (Strict isolation for accuracy)
+# NOTE: Bazel's Linux sandbox uses user namespaces (unshare).
+#   If running inside Docker, you may need --privileged or
+#   --security-opt seccomp=unconfined on the container.
+#   If that is not possible, fall back to --spawn_strategy=local.
+# ------------------------------------------------------------
+build --spawn_strategy=sandboxed,standalone
+build --strategy=CppCompile=sandboxed,standalone
+build --strategy=CppLink=sandboxed,standalone
+build --genrule_strategy=sandboxed,standalone
+
+# Collision-free test sandboxing.  Two independent safeguards:
+#
+# 1. No directory reuse — Bazel 7.x defaults --reuse_sandbox_directories=true
+#    which recycles sandbox dirs across actions.  With high --runs_per_test
+#    (TSan uses 20) and concurrent --local_test_jobs, the async cleanup
+#    races against new sandbox setup → "Could not copy inputs (File exists)".
+#    Builds still benefit from reuse; only tests opt out.
+#
+# 2. Synchronous cleanup — the default async mode (4 threads) can fall behind
+#    during bursts of short-lived test actions, leaving stale inodes that trip
+#    up the next sandbox setup.  Synchronous deletion guarantees a clean slate
+#    after every action.
+#
+# NOTE: Do NOT set --sandbox_base under /tmp here — it conflicts with
+# --sandbox_tmpfs_path=/tmp (Bazel refuses to run when the sandbox working
+# directory is below a tmpfs mount point).
+test --noreuse_sandbox_directories
+test --experimental_sandbox_async_tree_delete_idle_threads=0
+
+# ------------------------------------------------------------
+# 6. CACHING 
+# ------------------------------------------------------------
+build --disk_cache=.bazel/disk_cache
+
+# ------------------------------------------------------------
+# 7. PLATFORM CONFIGURATIONS
+# ------------------------------------------------------------
+# Handled automatically via --enable_platform_specific_config
+# which maps build:linux and build:macos based on the host OS.
+
+build:linux --repo_env=CC=clang
+build:linux --repo_env=CXX=clang++
+build:linux --linkopt=-fuse-ld=lld
+build:linux --worker_max_instances=16
+
+# ------------------------------------------------------------
+# 8. AUDIT MODE (Maximum Correctness Audit)
+# Usage: bazel build --config=audit //...
+# ------------------------------------------------------------
+build:audit --compilation_mode=dbg
+build:audit --copt=-g3
+build:audit --copt=-Wthread-safety
+build:audit --copt=-Wshadow
+build:audit --copt=-Wconversion
+build:audit --copt=-Wsign-conversion
+build:audit --copt=-Werror
+build:audit --features=parse_headers
+
+# ------------------------------------------------------------
+# 9. SANITIZER CONFIGURATIONS (TSAN, MSAN, ASAN)
+# All sanitizers are mutually exclusive. Run them separately.
+# The disk_cache ensures switching between them is near-instant.
+# ------------------------------------------------------------
+
+# -- Shared Sanitizer Base --
+# These flags apply to ALL sanitizer configurations.
+# -fno-omit-frame-pointer: preserves the call stack for accurate reports.
+# -fno-optimize-sibling-calls: prevents tail-call optimization from
+#   collapsing stack frames, ensuring complete traces.
+build:sanitizer_common --copt=-fno-omit-frame-pointer
+build:sanitizer_common --copt=-fno-optimize-sibling-calls
+build:sanitizer_common --features=-layering_check
+test:sanitizer_common --test_output=all
+test:sanitizer_common --test_timeout=300,900,1800,7200
+test:sanitizer_common --test_verbose_timeout_warnings
+
+# -- TSan: ThreadSanitizer --
+# Usage: bazel test --config=tsan //...
+# Detects: data races, deadlocks, lock-order inversions, misuse of atomics.
+build:tsan --config=sanitizer_common
+build:tsan --copt=-fsanitize=thread
+build:tsan --linkopt=-fsanitize=thread
+build:tsan --copt=-DTHREAD_SANITIZER
+test:tsan --action_env=TSAN_OPTIONS="history_size=7:halt_on_error=1:detect_deadlocks=1:second_deadlock_stack=1:strict_memcmp=1:report_atomic_races=1:force_seq_cst_atomics=1:exitcode=66:symbolize=1:print_suppressions=1"
+test:tsan --runs_per_test=20
+# Keep local_test_jobs low to prevent sandbox directory collisions.
+# With --runs_per_test=20, Bazel creates 20 sandbox instances per target.
+# At concurrency >4, sandbox cleanup can't keep up, causing
+# "Could not copy inputs into sandbox (File exists)" errors.
+test:tsan --local_test_jobs=4
+
+# -- Code Coverage --
+build:coverage --collect_code_coverage
+build:coverage --instrumentation_filter=^//src/.*
+build:coverage --combined_report=lcov
+
+# -- MSan: MemorySanitizer --
+# Usage: bazel test --config=msan //...
+# Detects: reads of uninitialized memory.
+# MSan requires -stdlib=libc++ because the MSan runtime has interceptors
+# for libc++ but NOT for libstdc++.  Without libc++, googletest itself
+# triggers false positives before any DCodeX code runs.
+# Requires: libc++-dev and libc++abi-dev (installed by dcodex-setup.sh).
+#
+# --spawn_strategy=standalone: libc++ headers (e.g. /usr/lib/llvm-19/include/c++/v1/)
+# are not in Bazel's auto-detected cxx_builtin_include_directories (which are
+# detected using libstdc++). The sandbox include validator rejects these as
+# "absolute path inclusion" errors.  Standalone bypasses the sandbox, which is
+# appropriate since MSan inherently depends on system-installed libc++.
+build:msan --config=sanitizer_common
+build:msan --spawn_strategy=standalone
+build:msan --copt=-fsanitize=memory
+build:msan --copt=-fsanitize-memory-track-origins=2
+build:msan --linkopt=-fsanitize=memory
+build:msan --copt=-DMEMORY_SANITIZER
+build:msan --copt=-stdlib=libc++
+build:msan --linkopt=-stdlib=libc++
+build:msan --linkopt=-lc++abi
+test:msan --action_env=MSAN_OPTIONS="halt_on_error=1:exitcode=77:suppressions=.github/workflows/msan_suppressions.txt"
+
+# -- ASan + UBSan: AddressSanitizer + UndefinedBehaviorSanitizer --
+# Usage: bazel test --config=asan //...
+# ASan detects: use-after-free, heap/stack buffer overflow, double-free,
+#   memory leaks. Critical for concurrency: catches Thread A freeing
+#   memory that Thread B is still reading.
+# UBSan detects: signed integer overflow, null dereference, misaligned
+#   pointers, type punning violations. These are paired because their
+#   shadow memory maps do not conflict.
+build:asan --config=sanitizer_common
+build:asan --copt=-fsanitize=address,undefined
+build:asan --linkopt=-fsanitize=address,undefined
+build:asan --copt=-fno-sanitize=vptr
+build:asan --linkopt=-fno-sanitize=vptr
+build:asan --copt=-fno-sanitize-recover=all
+build:asan --copt=-DADDRESS_SANITIZER
+test:asan --action_env=ASAN_OPTIONS="check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
+test:asan --action_env=UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
+
+# Platform-specific ASan overrides (Auto-selected via --enable_platform_specific_config)
+test:asan:linux --action_env=ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
+test:asan:macos --action_env=ASAN_OPTIONS="detect_leaks=0:check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
+
+# ------------------------------------------------------------
+# 10. MACOS CONFIGURATION (M1 / M-Series)
+# ------------------------------------------------------------
+build:macos --jobs=10
+build:macos --local_resources=cpu=8
+build:macos --local_resources=memory=16384
+build:macos --cpu=darwin_arm64
+build:macos --macos_cpus=arm64
+build:macos --apple_generate_dsym=true
+build:macos --copt=-faligned-allocation
+build:macos --copt=-mmacosx-version-min=12.0
+build:macos --linkopt=-mmacosx-version-min=12.0
+build:macos --features=-layering_check

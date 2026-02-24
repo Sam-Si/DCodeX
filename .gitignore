@@ -1,0 +1,168 @@
+# Bazel
+.bazel/
+/bazel-*
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+/bazel-genfiles
+/bazel-execroot
+MODULE.bazel.lock
+.bazelrc.local
+*.bazel~
+
+# ============================================================================
+# LOCAL TOOLS
+/bazelisk
+/bin/
+
+# ============================================================================
+# PROTOBUF GENERATED FILES
+*_pb2.py
+*_pb2_grpc.py
+*.pb.cc
+*.pb.h
+*.pbobjc.m
+
+# Protobuf generated
+__pycache__/
+*.py[cod]
+*.py[diw]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+# Python
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytest_cache/
+.mypy_cache/
+.mypy.ini
+.ruff_cache/
+.pytype/
+.pyre/
+.pyright/
+pyproject.toml.local
+cython_debug/
+
+# C/C++ BUILD ARTIFACTS
+# ============================================================================
+*.o
+*.a
+*.lib
+*.obj
+*.ko
+*.elf
+*.pch
+*.pdb
+*.ilk
+*.gch
+*.dSYM/
+
+# CMake (if used alongside Bazel)
+CMakeFiles/
+CTestTestfile.cmake
+_deps/
+
+# Code Coverage
+*.gcno
+*.gcda
+*.gcov
+
+pip-log.txt
+pip-delete-this-directory.txt
+# IDE & EDITOR CONFIGURATION
+# ============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.vim/
+.emacs.d/
+.project
+.classpath
+.settings/
+*.sublime-project
+*.code-workspace
+.DS_Store
+
+# VS Code
+.vscode/settings.json
+# C/C++
+
+# ============================================================================
+# DOCKER & CONTAINERIZATION
+# ============================================================================
+.dockerignore
+docker-compose.override.yml
+.docker/
+
+# Logs
+# DEV CONTAINER
+# ============================================================================
+.devcontainer/local.env
+# IDEs/Editors
+# OS & TEMPORARY FILES
+# ============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+*~
+.~*
+*.tmp
+*.temp
+.vscode-server
+.vscode-server-insiders
+
+# Misc
+# ============================================================================
+# ============================================================================
+*.pyc
+*.pyo
+*.pyd
+
+# GENERATED FILES
+# ============================================================================
+*.generated.py
+generated/
+
+# ============================================================================
+# LOCAL/TEMPORARY WORK
+# ============================================================================
+.local/
+.tmp/
+tmp/
+temp/
+*.bak
+*.backup
+.env
+.env.*
+*.tar
+*.zip
+*.gz

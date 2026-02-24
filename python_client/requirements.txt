@@ -1,0 +1,3 @@
+grpcio==1.80.0
+typing-extensions>=4.14.1
+pytest>=8.0

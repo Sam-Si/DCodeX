@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dcodex-client"
+version = "0.1.0"
+dependencies = [
+    "grpcio",
+    "grpcio-tools",
+]
+
+[tool.isort]
+profile = "black"
+known_first_party = ["python_client", "proto"]

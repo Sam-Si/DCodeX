@@ -1,0 +1,129 @@
+// Copyright 2024 DCodeX Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "src/api/code_executor_service.h"
+
+#include "absl/flags/flag.h"
+#include "absl/log/log.h"
+#include "absl/strings/string_view.h"
+#include "src/api/execute_reactor.h"
+
+ABSL_DECLARE_FLAG(int, max_concurrent_sandboxes);
+
+namespace dcodex {
+
+class RejectReactor final : public grpc::ServerWriteReactor<ExecutionLog> {
+ public:
+  RejectReactor(absl::string_view reason, CodeExecutorServiceImpl* owner)
+      : owner_(owner) {
+    Finish(grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                        std::string(reason)));
+  }
+
+  void OnDone() override;
+
+ private:
+  CodeExecutorServiceImpl* owner_;
+};
+
+void RejectReactor::OnDone() {
+  if (owner_ != nullptr) {
+    owner_->ReleaseRejectReactor(this);
+  }
+}
+
+CodeExecutorServiceImpl::CodeExecutorServiceImpl(int max_sandboxes,
+                                                 std::shared_ptr<CacheInterface> cache)
+    : active_sandboxes_(0),
+      worker_pool_([max_sandboxes]() {
+        DynamicWorkerCoordinator::Options opts;
+        opts.max_workers = max_sandboxes;
+        return opts;
+      }()),
+      executor_(std::make_shared<SandboxedProcess>(std::move(cache))) {
+  worker_pool_.Start();
+}
+
+CodeExecutorServiceImpl::~CodeExecutorServiceImpl() {
+  worker_pool_.Shutdown();
+  absl::MutexLock lock(&reject_mutex_);
+  reject_reactors_.clear();
+}
+
+void CodeExecutorServiceImpl::TrackRejectReactor(
+    const std::shared_ptr<RejectReactor>& reactor) {
+  absl::MutexLock lock(&reject_mutex_);
+  reject_reactors_.emplace(reactor.get(), reactor);
+}
+
+void CodeExecutorServiceImpl::ReleaseRejectReactor(const RejectReactor* reactor) {
+  absl::MutexLock lock(&reject_mutex_);
+  reject_reactors_.erase(reactor);
+}
+
+grpc::ServerWriteReactor<ExecutionLog>* CodeExecutorServiceImpl::Execute(
+    grpc::CallbackServerContext* context, const CodeRequest* request) {
+  (void)context;
+  if (active_sandboxes_.load() >= absl::GetFlag(FLAGS_max_concurrent_sandboxes)) {
+    auto reactor = std::make_shared<RejectReactor>(
+        "Too many active sandboxes", this);
+    TrackRejectReactor(reactor);
+    return reactor.get();
+  }
+  auto reactor = std::make_shared<ExecuteReactor>(request, active_sandboxes_,
+                                                   &worker_pool_, executor_);
+  
+  LanguageId lang = ParseLanguageId(request->language());
+  absl::StatusOr<WorkerTask*> assignment = worker_pool_.LeaseWorker(lang, reactor);
+  
+  if (!assignment.ok()) {
+    LOG(WARNING) << "Worker pool rejected request: " << assignment.status();
+    auto reject_reactor = std::make_shared<RejectReactor>(
+        "Worker pool rejected request", this);
+    TrackRejectReactor(reject_reactor);
+    return reject_reactor.get();
+  }
+  return reactor.get();
+}
+
+grpc::ServerUnaryReactor* CodeExecutorServiceImpl::GetSystemMetrics(
+    grpc::CallbackServerContext* context, const EmptyRequest* /*request*/,
+    SystemMetrics* response) {
+  auto* reactor = context->DefaultReactor();
+
+  // Aggregate metrics from the pool and the executor.
+  auto pool_m = worker_pool_.GetMetrics();
+  auto exec_m = executor_->GetMetrics();
+
+  response->set_active_workers(pool_m.active_workers);
+  response->set_idle_workers(pool_m.idle_workers);
+  response->set_recycling_workers(pool_m.recycling_workers);
+  response->set_current_pool_size(pool_m.current_pool_size);
+
+  response->set_total_requests_served(pool_m.total_requests_served);
+  response->set_p50_latency_ms(pool_m.p50_latency_ms);
+  response->set_p99_latency_ms(pool_m.p99_latency_ms);
+
+  response->set_cache_hits(static_cast<int64_t>(exec_m.cache_stats.hits));
+  response->set_cache_misses(static_cast<int64_t>(exec_m.cache_stats.misses));
+
+  // Placeholder for hardware-level metrics if needed in future.
+  response->set_peak_memory_usage_bytes(0);
+  response->set_cpu_load_average(0.0);
+
+  reactor->Finish(grpc::Status::OK);
+  return reactor;
+}
+
+}  // namespace dcodex

@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package dcodex;
+
+service CodeExecutor {
+  rpc Execute(CodeRequest) returns (stream ExecutionLog);
+  rpc GetSystemMetrics(EmptyRequest) returns (SystemMetrics);
+}
+
+message EmptyRequest {}
+
+message SystemMetrics {
+  // Pool status
+  int32 active_workers = 1;
+  int32 idle_workers = 2;
+  int32 recycling_workers = 3;
+  int32 current_pool_size = 4;
+  
+  // Throughput & Latency
+  int64 total_requests_served = 5;
+  double p50_latency_ms = 6;
+  double p99_latency_ms = 7;
+  
+  // Cache efficiency
+  int64 cache_hits = 8;
+  int64 cache_misses = 9;
+  
+  // Resource usage
+  int64 peak_memory_usage_bytes = 10;
+  double cpu_load_average = 11;
+}
+
+message CodeRequest {
+  string language = 1;
+  string code = 2;
+  // Optional data to feed to the program's standard input (stdin).
+  // If empty, the process receives EOF on stdin immediately.
+  string stdin_data = 3;
+}
+
+message ExecutionLog {
+  string stdout_chunk = 1;
+  string stderr_chunk = 2;
+  // Resource usage metrics
+  int64 peak_memory_bytes = 3;
+  float execution_time_ms = 4;
+  // Cache status
+  bool cache_hit = 5;
+  // Set to true when the process was forcibly terminated because it exceeded
+  // the wall-clock timeout (kWallClockTimeoutSeconds on the server).
+  bool wall_clock_timeout = 6;
+  // Set to true when the combined stdout+stderr output exceeded the server's
+  // output size limit (kMaxOutputBytes).  The process is killed at that point
+  // and a truncation notice is appended to the output.
+  bool output_truncated = 7;
+}
