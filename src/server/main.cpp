@@ -15,17 +15,22 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
-#include <iomanip>
-#include <iostream>
 #include <memory>
-#include <mutex>
 #include <queue>
-#include <sstream>
-#include <string>
 #include <thread>
 
+#include "absl/flags/flag.h"
+#include "absl/flags/parse.h"
+#include "absl/log/initialize.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
 #include "src/server/sandbox.h"
+
+ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
+ABSL_FLAG(int, max_concurrent_sandboxes, 10,
+          "Maximum number of concurrent sandboxes allowed");
 
 using grpc::CallbackServerContext;
 using grpc::Server;
@@ -33,21 +38,15 @@ using grpc::ServerBuilder;
 using grpc::ServerWriteReactor;
 using grpc::Status;
 using grpc::StatusCode;
-using dcodex::CodeExecutor;
-using dcodex::CodeRequest;
-using dcodex::ExecutionLog;
-using dcodex::SandboxedProcess;
 
 namespace dcodex {
+
+namespace {
 
 // Helper class to manage execution reactor state and output buffering.
 class ExecutionReactorState {
  public:
-  ExecutionReactorState()
-      : finished_(false),
-        writing_(false),
-        stats_sent_(false),
-        cache_hit_(false) {}
+  ExecutionReactorState() = default;
 
   // Queues an execution log entry.
   void QueueLog(const ExecutionLog& log) { queue_.push(log); }
@@ -81,9 +80,7 @@ class ExecutionReactorState {
   void SetWriting(bool writing) { writing_ = writing; }
 
   // Sets resource statistics.
-  void SetStats(const SandboxedProcess::ResourceStats& stats) {
-    stats_ = stats;
-  }
+  void SetStats(const SandboxedProcess::ResourceStats& stats) { stats_ = stats; }
 
   // Gets resource statistics.
   const SandboxedProcess::ResourceStats& GetStats() const { return stats_; }
@@ -96,10 +93,10 @@ class ExecutionReactorState {
 
  private:
   std::queue<ExecutionLog> queue_;
-  bool finished_;
-  bool writing_;
-  bool stats_sent_;
-  bool cache_hit_;
+  bool finished_ = false;
+  bool writing_ = false;
+  bool stats_sent_ = false;
+  bool cache_hit_ = false;
   SandboxedProcess::ResourceStats stats_;
 };
 
@@ -107,8 +104,7 @@ class ExecutionReactorState {
 class RejectReactor : public ServerWriteReactor<ExecutionLog> {
  public:
   RejectReactor() {
-    Finish(Status(StatusCode::RESOURCE_EXHAUSTED,
-                  "Too many active sandboxes"));
+    Finish(Status(StatusCode::RESOURCE_EXHAUSTED, "Too many active sandboxes"));
   }
 
   void OnDone() override { delete this; }
@@ -119,11 +115,12 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
  public:
   ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter)
       : request_(request), counter_(counter) {
+    counter_.fetch_add(1);
     StartExecution();
   }
 
   void OnWriteDone(bool ok) override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    absl::MutexLock lock(&mutex_);
     state_.SetWriting(false);
     if (!ok) {
       return;
@@ -153,8 +150,7 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
   void ExecuteInBackground() {
     auto result = SandboxedProcess::CompileAndRunStreaming(
         request_->code(),
-        [this](const std::string& stdout_chunk,
-               const std::string& stderr_chunk) {
+        [this](absl::string_view stdout_chunk, absl::string_view stderr_chunk) {
           HandleExecutionOutput(stdout_chunk, stderr_chunk);
         });
 
@@ -162,19 +158,23 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
   }
 
   // Handles output chunks from execution.
-  void HandleExecutionOutput(const std::string& stdout_chunk,
-                              const std::string& stderr_chunk) {
-    std::lock_guard<std::mutex> lock(mutex_);
+  void HandleExecutionOutput(absl::string_view stdout_chunk,
+                             absl::string_view stderr_chunk) {
+    absl::MutexLock lock(&mutex_);
     ExecutionLog log;
-    log.set_stdout_chunk(stdout_chunk);
-    log.set_stderr_chunk(stderr_chunk);
+    if (!stdout_chunk.empty()) {
+      log.set_stdout_chunk(std::string(stdout_chunk));
+    }
+    if (!stderr_chunk.empty()) {
+      log.set_stderr_chunk(std::string(stderr_chunk));
+    }
     state_.QueueLog(log);
     MaybeWriteNext();
   }
 
   // Handles completion of execution.
   void HandleExecutionComplete(const SandboxedProcess::Result& result) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    absl::MutexLock lock(&mutex_);
     state_.SetStats(result.stats);
     state_.SetCacheHit(result.cache_hit);
     state_.MarkFinished();
@@ -218,53 +218,60 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
 
   const CodeRequest* request_;
   std::thread worker_thread_;
-  std::mutex mutex_;
+  absl::Mutex mutex_;
   ExecutionReactorState state_;
   ExecutionLog current_log_;
   std::atomic<int>& counter_;
 };
-
-}  // namespace dcodex
 
 // Implements the gRPC CodeExecutor service.
 class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
  public:
   CodeExecutorServiceImpl() : active_sandboxes_(0) {}
 
-  ServerWriteReactor<ExecutionLog>* Execute(CallbackServerContext* context,
-                                            const CodeRequest* request) override {
-    return HandleExecuteRequest(request);
+  ServerWriteReactor<ExecutionLog>* Execute(
+      CallbackServerContext* context, const CodeRequest* request) override {
+    if (active_sandboxes_.load() >=
+        absl::GetFlag(FLAGS_max_concurrent_sandboxes)) {
+      return new RejectReactor();
+    }
+    return new ExecuteReactor(request, active_sandboxes_);
   }
 
  private:
-  // Handles an incoming execute request.
-  ServerWriteReactor<ExecutionLog>* HandleExecuteRequest(
-      const CodeRequest* request) {
-    if (active_sandboxes_.fetch_add(1) >= 10) {
-      active_sandboxes_.fetch_sub(1);
-      return new dcodex::RejectReactor();
-    }
-    return new dcodex::ExecuteReactor(request, active_sandboxes_);
-  }
-
   std::atomic<int> active_sandboxes_;
 };
 
+}  // namespace
+
 // Starts the gRPC server and waits for connections.
-void RunServer() {
-  std::string server_address("0.0.0.0:50051");
+absl::Status RunServer() {
+  std::string server_address =
+      absl::StrCat("0.0.0.0:", absl::GetFlag(FLAGS_port));
   CodeExecutorServiceImpl service;
 
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
-  std::cout << "Server listening on " << server_address << std::endl;
+  if (!server) {
+    return absl::InternalError("Failed to start gRPC server");
+  }
+  LOG(INFO) << "Server listening on " << server_address;
   server->Wait();
+  return absl::OkStatus();
 }
+
+}  // namespace dcodex
 
 // Entry point for the application.
 int main(int argc, char** argv) {
-  RunServer();
+  absl::InitializeLog();
+  absl::ParseCommandLine(argc, argv);
+  absl::Status status = dcodex::RunServer();
+  if (!status.ok()) {
+    LOG(ERROR) << "Server failed: " << status.message();
+    return 1;
+  }
   return 0;
 }

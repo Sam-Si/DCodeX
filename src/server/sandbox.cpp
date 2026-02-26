@@ -24,9 +24,14 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
-#include <sstream>
-#include <vector>
+
+#include "absl/cleanup/cleanup.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 
 namespace dcodex {
 
@@ -44,9 +49,8 @@ class CacheHolder {
 // Buffer to capture output for caching.
 class OutputBuffer {
  public:
-  void AppendStdout(const std::string& data) { stdout_ += data; }
-
-  void AppendStderr(const std::string& data) { stderr_ += data; }
+  void AppendStdout(absl::string_view data) { stdout_.append(data); }
+  void AppendStderr(absl::string_view data) { stderr_.append(data); }
 
   [[nodiscard]] const std::string& GetStdout() const { return stdout_; }
   [[nodiscard]] const std::string& GetStderr() const { return stderr_; }
@@ -61,12 +65,10 @@ class FileDescriptor {
  public:
   explicit FileDescriptor(int fd = -1) noexcept : fd_(fd) {}
 
-  // Move constructor.
   FileDescriptor(FileDescriptor&& other) noexcept : fd_(other.fd_) {
     other.fd_ = -1;
   }
 
-  // Move assignment.
   FileDescriptor& operator=(FileDescriptor&& other) noexcept {
     if (this != &other) {
       Reset();
@@ -75,10 +77,6 @@ class FileDescriptor {
     }
     return *this;
   }
-
-  // Not copyable.
-  FileDescriptor(const FileDescriptor&) = delete;
-  FileDescriptor& operator=(const FileDescriptor&) = delete;
 
   ~FileDescriptor() { Reset(); }
 
@@ -107,12 +105,10 @@ class PipePair {
  public:
   PipePair() = default;
 
-  // Move constructor.
   PipePair(PipePair&& other) noexcept
       : read_end_(std::move(other.read_end_)),
         write_end_(std::move(other.write_end_)) {}
 
-  // Move assignment.
   PipePair& operator=(PipePair&& other) noexcept {
     if (this != &other) {
       read_end_ = std::move(other.read_end_);
@@ -120,10 +116,6 @@ class PipePair {
     }
     return *this;
   }
-
-  // Not copyable.
-  PipePair(const PipePair&) = delete;
-  PipePair& operator=(const PipePair&) = delete;
 
   [[nodiscard]] bool Create() {
     int fds[2];
@@ -156,7 +148,8 @@ class PipePair {
 // RAII wrapper for temporary files.
 class TempFile {
  public:
-  explicit TempFile(std::filesystem::path path) noexcept : path_(std::move(path)) {}
+  explicit TempFile(std::filesystem::path path) noexcept
+      : path_(std::move(path)) {}
 
   TempFile(TempFile&& other) noexcept : path_(std::move(other.path_)) {
     other.path_.clear();
@@ -171,13 +164,11 @@ class TempFile {
     return *this;
   }
 
-  // Not copyable.
-  TempFile(const TempFile&) = delete;
-  TempFile& operator=(const TempFile&) = delete;
-
   ~TempFile() { Remove(); }
 
-  [[nodiscard]] const std::filesystem::path& Path() const noexcept { return path_; }
+  [[nodiscard]] const std::filesystem::path& Path() const noexcept {
+    return path_;
+  }
 
   void Release() noexcept { path_.clear(); }
 
@@ -212,8 +203,9 @@ void RedirectFileDescriptors(int stdout_write_fd, int stderr_write_fd) {
 }
 
 // Helper to prepare argv for execvp call.
-[[nodiscard]] std::vector<char*> PrepareArgv(const std::vector<std::string>& argv) {
-  std::vector<char*> c_argv;
+[[nodiscard]] absl::InlinedVector<char*, 8> PrepareArgv(
+    absl::Span<const std::string> argv) {
+  absl::InlinedVector<char*, 8> c_argv;
   c_argv.reserve(argv.size() + 1);
   for (const auto& arg : argv) {
     c_argv.push_back(const_cast<char*>(arg.c_str()));
@@ -223,15 +215,15 @@ void RedirectFileDescriptors(int stdout_write_fd, int stderr_write_fd) {
 }
 
 // Helper to read from a pipe and invoke callback.
-[[nodiscard]] bool ReadFromPipe(int fd, std::array<char, 4096>& buffer,
-                                const SandboxedProcess::OutputCallback& callback,
-                                bool is_stdout) {
+[[nodiscard]] bool ReadFromPipe(
+    int fd, std::array<char, 4096>& buffer,
+    const SandboxedProcess::OutputCallback& callback, bool is_stdout) {
   ssize_t bytes = read(fd, buffer.data(), buffer.size());
   if (bytes > 0) {
     if (is_stdout) {
-      callback(std::string(buffer.data(), bytes), "");
+      callback(absl::string_view(buffer.data(), bytes), "");
     } else {
-      callback("", std::string(buffer.data(), bytes));
+      callback("", absl::string_view(buffer.data(), bytes));
     }
     return true;
   }
@@ -240,8 +232,7 @@ void RedirectFileDescriptors(int stdout_write_fd, int stderr_write_fd) {
 
 // Helper to compute resource statistics from rusage.
 [[nodiscard]] SandboxedProcess::ResourceStats ComputeResourceStats(
-    const struct rusage& usage, const struct timeval& start_time,
-    const struct timeval& end_time) {
+    const struct rusage& usage, absl::Time start_time, absl::Time end_time) {
   SandboxedProcess::ResourceStats stats;
 #ifdef __APPLE__
   stats.peak_memory_bytes = usage.ru_maxrss;
@@ -252,9 +243,7 @@ void RedirectFileDescriptors(int stdout_write_fd, int stderr_write_fd) {
       usage.ru_utime.tv_sec * 1000 + usage.ru_utime.tv_usec / 1000;
   stats.system_time_ms =
       usage.ru_stime.tv_sec * 1000 + usage.ru_stime.tv_usec / 1000;
-  long elapsed_sec = end_time.tv_sec - start_time.tv_sec;
-  long elapsed_usec = end_time.tv_usec - start_time.tv_usec;
-  stats.elapsed_time_ms = elapsed_sec * 1000 + elapsed_usec / 1000;
+  stats.elapsed_time_ms = absl::ToInt64Milliseconds(end_time - start_time);
   return stats;
 }
 
@@ -306,13 +295,14 @@ void StoreCacheResult(const std::string& code_hash,
 }
 
 SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(
-    const std::string& code, OutputCallback callback) {
+    absl::string_view code, OutputCallback callback) {
   // Computes hash of the code.
-  std::string code_hash = ExecutionCache::ComputeHash(code);
-  if (code_hash.empty()) {
+  auto hash_result = ExecutionCache::ComputeHash(code);
+  if (!hash_result.ok()) {
     // Hash computation failed, executes without caching.
     return ExecuteWithoutCache(code, callback);
   }
+  const std::string& code_hash = hash_result.value();
 
   // Checks cache first.
   auto cached = GetCache().Get(code_hash);
@@ -325,8 +315,8 @@ SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(
   OutputBuffer buffer;
 
   auto wrapping_callback = [&callback, &buffer](
-                               const std::string& stdout_chunk,
-                               const std::string& stderr_chunk) {
+                               absl::string_view stdout_chunk,
+                               absl::string_view stderr_chunk) {
     if (!stdout_chunk.empty()) {
       buffer.AppendStdout(stdout_chunk);
       callback(stdout_chunk, "");
@@ -337,7 +327,8 @@ SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(
     }
   };
 
-  SandboxedProcess::Result result = ExecuteWithoutCache(code, wrapping_callback);
+  SandboxedProcess::Result result =
+      ExecuteWithoutCache(code, wrapping_callback);
 
   // Stores in cache if execution was successful.
   if (result.success) {
@@ -348,49 +339,51 @@ SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(
 }
 
 SandboxedProcess::Result SandboxedProcess::ExecuteWithoutCache(
-    const std::string& code, OutputCallback callback) {
+    absl::string_view code, OutputCallback callback) {
   std::string source_file = WriteTempFile(".cpp", code);
   if (source_file.empty()) {
     return {false, "Failed to create source file", {}};
   }
-  
+
   TempFile source_guard(source_file);
   std::filesystem::path binary_path = source_file + ".bin";
+  absl::Cleanup binary_cleanup = [&binary_path] {
+    std::error_code ec;
+    std::filesystem::remove(binary_path, ec);
+  };
 
   // Compilation step (not sandboxed, captures output via callback).
+  absl::InlinedVector<std::string, 4> compile_args = {
+      "g++", "-std=c++17", source_file, "-o", binary_path.string()};
   Result compile_result = ExecuteCommandStreaming(
-      {"g++", "-std=c++17", source_file, "-o", binary_path.string()},
-      callback, false);
+      absl::MakeSpan(compile_args), callback, false);
   if (!compile_result.success) {
     return compile_result;
   }
 
   // Execution step (sandboxed).
+  absl::InlinedVector<std::string, 2> run_args = {binary_path.string()};
   Result run_result =
-      ExecuteCommandStreaming({binary_path.string()}, callback, true);
-
-  // Cleanup binary (source file cleaned up by TempFile RAII).
-  std::error_code ec;
-  std::filesystem::remove(binary_path, ec);
+      ExecuteCommandStreaming(absl::MakeSpan(run_args), callback, true);
 
   return run_result;
 }
 
-std::string SandboxedProcess::WriteTempFile(std::string_view extension,
-                                            std::string_view content) {
+std::string SandboxedProcess::WriteTempFile(absl::string_view extension,
+                                            absl::string_view content) {
   char template_str[] = "/tmp/dcodex_XXXXXX";
   FileDescriptor fd(mkstemp(template_str));
   if (!fd.IsValid()) return "";
   // File descriptor closed by RAII, we just need the filename
 
-  std::string path = std::string(template_str) + std::string(extension);
+  std::string path = absl::StrCat(template_str, extension);
   std::ofstream out(path);
   out << content;
   return path;
 }
 
 // Handles the child process execution setup.
-void ExecuteChildProcess(const std::vector<std::string>& argv,
+void ExecuteChildProcess(absl::Span<const std::string> argv,
                          int stdout_write_fd, int stderr_write_fd,
                          bool sandboxed) {
   if (sandboxed) {
@@ -441,7 +434,7 @@ void ReadProcessOutput(int stdout_read_fd, int stderr_read_fd,
 
 // Waits for child process and collects resource statistics.
 [[nodiscard]] SandboxedProcess::Result WaitForChildProcess(
-    pid_t pid, const struct timeval& start_time) {
+    pid_t pid, absl::Time start_time) {
   int status;
   struct rusage usage;
   pid_t result = wait4(pid, &status, 0, &usage);
@@ -450,8 +443,7 @@ void ReadProcessOutput(int stdout_read_fd, int stderr_read_fd,
     return {false, "Failed to wait for child process", {}};
   }
 
-  struct timeval end_time;
-  gettimeofday(&end_time, nullptr);
+  absl::Time end_time = absl::Now();
 
   bool success = WIFEXITED(status) && WEXITSTATUS(status) == 0;
   SandboxedProcess::ResourceStats stats =
@@ -462,7 +454,7 @@ void ReadProcessOutput(int stdout_read_fd, int stderr_read_fd,
 }
 
 SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(
-    const std::vector<std::string>& argv, OutputCallback callback,
+    absl::Span<const std::string> argv, OutputCallback callback,
     bool sandboxed) {
   PipePair stdout_pipe;
   PipePair stderr_pipe;
@@ -471,8 +463,7 @@ SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(
     return {false, "Failed to create pipes", {}};
   }
 
-  struct timeval start_time;
-  gettimeofday(&start_time, nullptr);
+  absl::Time start_time = absl::Now();
 
   pid_t pid = fork();
   if (pid == -1) {

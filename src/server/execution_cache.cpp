@@ -14,9 +14,8 @@
 
 #include "src/server/execution_cache.h"
 
-#include <algorithm>
-#include <iomanip>
-#include <sstream>
+#include "absl/algorithm/container.h"
+#include "absl/strings/str_format.h"
 
 namespace dcodex {
 
@@ -28,13 +27,11 @@ constexpr uint64_t kFnvPrime = 1099511628211ULL;
 
 // Converts 64-bit hash to hex string.
 std::string HashToHex(uint64_t hash) {
-  std::stringstream ss;
-  ss << std::hex << std::setfill('0') << std::setw(16) << hash;
-  return ss.str();
+  return absl::StrFormat("%016x", hash);
 }
 
 // Simple FNV-1a hash function - fast and good distribution.
-uint64_t Fnv1aHash(const std::string& data) {
+uint64_t Fnv1aHash(absl::string_view data) {
   uint64_t hash = kFnvOffsetBasis;
   for (unsigned char c : data) {
     hash ^= static_cast<uint64_t>(c);
@@ -45,12 +42,12 @@ uint64_t Fnv1aHash(const std::string& data) {
 
 }  // namespace
 
-ExecutionCache::ExecutionCache(std::chrono::seconds ttl, size_t max_entries)
+ExecutionCache::ExecutionCache(absl::Duration ttl, size_t max_entries)
     : ttl_(ttl), max_entries_(max_entries) {}
 
 std::shared_ptr<const CachedResult> ExecutionCache::Get(
-    const std::string& code_hash) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+    absl::string_view code_hash) {
+  absl::MutexLock lock(&mutex_);
 
   auto it = cache_.find(code_hash);
   if (it == cache_.end()) {
@@ -63,25 +60,23 @@ std::shared_ptr<const CachedResult> ExecutionCache::Get(
   }
 
   // Updates access order for LRU (promote to front).
-  auto order_it =
-      std::find(access_order_.begin(), access_order_.end(), code_hash);
+  auto order_it = absl::c_find(access_order_, code_hash);
   if (order_it != access_order_.end()) {
     access_order_.erase(order_it);
   }
-  access_order_.push_back(code_hash);
+  access_order_.push_back(std::string(code_hash));
 
   return it->second;
 }
 
-void ExecutionCache::Put(const std::string& code_hash,
+void ExecutionCache::Put(absl::string_view code_hash,
                          const CachedResult& result) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  absl::MutexLock lock(&mutex_);
 
   // Removes old entry if exists (to update access order).
   auto it = cache_.find(code_hash);
   if (it != cache_.end()) {
-    auto order_it =
-        std::find(access_order_.begin(), access_order_.end(), code_hash);
+    auto order_it = absl::c_find(access_order_, code_hash);
     if (order_it != access_order_.end()) {
       access_order_.erase(order_it);
     }
@@ -92,21 +87,25 @@ void ExecutionCache::Put(const std::string& code_hash,
 
   // Inserts new entry.
   auto cached = std::make_shared<CachedResult>(result);
-  cached->timestamp = std::chrono::steady_clock::now();
-  cache_[code_hash] = cached;
-  access_order_.push_back(code_hash);
+  cached->timestamp = absl::Now();
+  cache_[std::string(code_hash)] = cached;
+  access_order_.push_back(std::string(code_hash));
 }
 
-std::string ExecutionCache::ComputeHash(const std::string& code) {
+absl::StatusOr<std::string> ExecutionCache::ComputeHash(
+    absl::string_view code) {
+  if (code.empty()) {
+    return absl::InvalidArgumentError("Code cannot be empty");
+  }
   uint64_t hash = Fnv1aHash(code);
   return HashToHex(hash);
 }
 
 void ExecutionCache::CleanupExpired() {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  absl::MutexLock lock(&mutex_);
 
-  auto now = std::chrono::steady_clock::now();
-  std::vector<std::string> to_remove;
+  auto now = absl::Now();
+  absl::InlinedVector<std::string, 16> to_remove;
 
   for (const auto& [hash, result] : cache_) {
     if (now - result->timestamp > ttl_) {
@@ -116,8 +115,7 @@ void ExecutionCache::CleanupExpired() {
 
   for (const auto& hash : to_remove) {
     cache_.erase(hash);
-    auto order_it =
-        std::find(access_order_.begin(), access_order_.end(), hash);
+    auto order_it = absl::c_find(access_order_, hash);
     if (order_it != access_order_.end()) {
       access_order_.erase(order_it);
     }
@@ -125,13 +123,13 @@ void ExecutionCache::CleanupExpired() {
 }
 
 void ExecutionCache::Clear() {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
+  absl::MutexLock lock(&mutex_);
   cache_.clear();
   access_order_.clear();
 }
 
 size_t ExecutionCache::Size() const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  absl::MutexLock lock(&mutex_);
   return cache_.size();
 }
 
@@ -144,7 +142,7 @@ void ExecutionCache::EvictIfNeeded() {
 }
 
 bool ExecutionCache::IsExpired(const CachedResult& result) const {
-  auto now = std::chrono::steady_clock::now();
+  auto now = absl::Now();
   return (now - result.timestamp) > ttl_;
 }
 

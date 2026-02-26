@@ -15,12 +15,11 @@
 #ifndef SRC_SERVER_SANDBOX_H_
 #define SRC_SERVER_SANDBOX_H_
 
-#include <chrono>
 #include <functional>
-#include <string>
-#include <string_view>
-#include <vector>
 
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #include "src/server/execution_cache.h"
 
 namespace dcodex {
@@ -50,13 +49,13 @@ class SandboxedProcess {
   };
 
   using OutputCallback =
-      std::function<void(const std::string& stdout_chunk,
-                         const std::string& stderr_chunk)>;
+      std::function<void(absl::string_view stdout_chunk,
+                         absl::string_view stderr_chunk)>;
 
   // Compiles and runs code with caching support.
   // Returns cached result if available, otherwise executes and caches.
-  [[nodiscard]] static Result CompileAndRunStreaming(const std::string& code,
-                                                      OutputCallback callback);
+  [[nodiscard]] static Result CompileAndRunStreaming(
+      absl::string_view code, OutputCallback callback);
 
   // Accesses the global execution cache.
   [[nodiscard]] static ExecutionCache& GetCache();
@@ -65,14 +64,14 @@ class SandboxedProcess {
   static void ClearCache();
 
  private:
-  [[nodiscard]] static std::string WriteTempFile(std::string_view extension,
-                                                  std::string_view content);
+  [[nodiscard]] static std::string WriteTempFile(absl::string_view extension,
+                                                  absl::string_view content);
   [[nodiscard]] static Result ExecuteCommandStreaming(
-      const std::vector<std::string>& argv, OutputCallback callback,
+      absl::Span<const std::string> argv, OutputCallback callback,
       bool sandboxed = false);
 
   // Internal execution without caching.
-  [[nodiscard]] static Result ExecuteWithoutCache(const std::string& code,
+  [[nodiscard]] static Result ExecuteWithoutCache(absl::string_view code,
                                                    OutputCallback callback);
 };
 
