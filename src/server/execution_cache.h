@@ -15,15 +15,16 @@
 #ifndef SRC_SERVER_EXECUTION_CACHE_H_
 #define SRC_SERVER_EXECUTION_CACHE_H_
 
-#include <chrono>
 #include <cstdint>
 #include <memory>
-#include <mutex>
-#include <shared_mutex>
-#include <string>
-#include <unordered_map>
-#include <utility>
-#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 
 namespace dcodex {
 
@@ -35,32 +36,26 @@ struct CachedResult {
   float execution_time_ms = 0.0f;
   bool success = false;
   std::string error_message;
-  std::chrono::steady_clock::time_point timestamp;
+  absl::Time timestamp;
 };
 
 // Thread-safe LRU cache with TTL support for code execution results.
 class ExecutionCache {
  public:
   // Default TTL: 1 hour, max entries: 1000.
-  explicit ExecutionCache(std::chrono::seconds ttl = std::chrono::hours(1),
-                         size_t max_entries = 1000);
-
-  ~ExecutionCache() = default;
-
-  // Disable copy and move.
-  ExecutionCache(const ExecutionCache&) = delete;
-  ExecutionCache& operator=(const ExecutionCache&) = delete;
+  explicit ExecutionCache(absl::Duration ttl = absl::Hours(1),
+                          size_t max_entries = 1000);
 
   // Gets cached result if available and not expired.
   // Returns nullptr if not found or expired.
-  std::shared_ptr<const CachedResult> Get(
-      const std::string& code_hash) const;
+  std::shared_ptr<const CachedResult> Get(absl::string_view code_hash);
 
   // Stores result in cache.
-  void Put(const std::string& code_hash, const CachedResult& result);
+  void Put(absl::string_view code_hash, const CachedResult& result);
 
   // Computes hash of code using FNV-1a algorithm.
-  static std::string ComputeHash(const std::string& code);
+  // Returns error status if hash computation fails.
+  static absl::StatusOr<std::string> ComputeHash(absl::string_view code);
 
   // Clears all expired entries.
   void CleanupExpired();
@@ -72,15 +67,16 @@ class ExecutionCache {
   size_t Size() const;
 
  private:
-  mutable std::shared_mutex mutex_;
-  std::unordered_map<std::string, std::shared_ptr<CachedResult>> cache_;
-  std::chrono::seconds ttl_;
-  size_t max_entries_;
+  mutable absl::Mutex mutex_;
+  absl::flat_hash_map<std::string, std::shared_ptr<CachedResult>> cache_
+      ABSL_GUARDED_BY(mutex_);
+  const absl::Duration ttl_;
+  const size_t max_entries_;
 
-  // LRU tracking.
-  mutable std::vector<std::string> access_order_;
+  // LRU tracking using inlined vector for better cache locality.
+  absl::InlinedVector<std::string, 16> access_order_ ABSL_GUARDED_BY(mutex_);
 
-  void EvictIfNeeded();
+  void EvictIfNeeded() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   bool IsExpired(const CachedResult& result) const;
 };
 

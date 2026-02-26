@@ -4,15 +4,23 @@
 /bazel-out
 /bazel-testlogs
 /bazel-genfiles
+/bazel-execroot
 MODULE.bazel.lock
+.bazelrc.local
+*.bazel~
 
-# Protobuf generated
+# ============================================================================
+# PROTOBUF GENERATED FILES
 *_pb2.py
 *_pb2_grpc.py
+*.pb.cc
+*.pb.h
+*.pbobjc.m
 
-# Python
+# Protobuf generated
 __pycache__/
 *.py[cod]
+*.py[diw]
 *$py.class
 *.so
 .Python
@@ -28,22 +36,17 @@ parts/
 sdist/
 var/
 wheels/
+pip-wheel-metadata/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+
+# Virtual Environments
 .venv/
 venv/
 ENV/
 env/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
+# Python
 coverage.xml
 *.cover
 *.py,cover
@@ -51,13 +54,16 @@ coverage.xml
 .pytest_cache/
 pytest_cache/
 .mypy_cache/
+.mypy.ini
 .ruff_cache/
 .pytype/
 .pyre/
 .pyright/
+pyproject.toml.local
 cython_debug/
 
-# C/C++
+# C/C++ BUILD ARTIFACTS
+# ============================================================================
 *.o
 *.a
 *.lib
@@ -67,37 +73,88 @@ cython_debug/
 *.pch
 *.pdb
 *.ilk
-*.exp
 *.gch
 *.dSYM/
+
+# CMake (if used alongside Bazel)
 CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-compile_commands.json
 CTestTestfile.cmake
 _deps/
+
+# Code Coverage
 *.gcno
 *.gcda
 *.gcov
 
-# IDEs/Editors
+pip-log.txt
+pip-delete-this-directory.txt
+# IDE & EDITOR CONFIGURATION
+# ============================================================================
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+.vim/
+.emacs.d/
 .project
 .classpath
 .settings/
-*.sublime-workspace
 *.sublime-project
+*.code-workspace
 .DS_Store
 
+# VS Code
+.vscode/settings.json
+# C/C++
+
+# ============================================================================
+# DOCKER & CONTAINERIZATION
+# ============================================================================
+.dockerignore
+docker-compose.override.yml
+.docker/
+
 # Logs
-*.log
-logs/
+# DEV CONTAINER
+# ============================================================================
+.devcontainer/local.env
+# IDEs/Editors
+# OS & TEMPORARY FILES
+# ============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+*~
+.~*
+*.tmp
+*.temp
+.vscode-server
+.vscode-server-insiders
 
 # Misc
+# ============================================================================
+# ============================================================================
+*.pyc
+*.pyo
+*.pyd
+
+# GENERATED FILES
+# ============================================================================
+*.generated.py
+generated/
+
+# ============================================================================
+# LOCAL/TEMPORARY WORK
+# ============================================================================
+.local/
+.tmp/
+tmp/
+temp/
+*.bak
+*.backup
 .env
 .env.*
 *.tar
