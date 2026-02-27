@@ -39,7 +39,7 @@ namespace dcodex {
 namespace {
 
 // --- SRP: Resource Monitoring Constants ---
-constexpr int kWallClockTimeoutSeconds = 5;
+constexpr int kWallClockTimeoutSeconds = SandboxLimits::kWallClockTimeoutSeconds;
 
 // --- SRP: File Management ---
 class TempFileManager {
@@ -114,9 +114,11 @@ class PipePair {
 class ProcessRunner {
  public:
   static void ApplyResourceLimits() {
-    struct rlimit cpu_limit{2, 2};
+    struct rlimit cpu_limit{SandboxLimits::kCpuTimeLimitSeconds,
+                            SandboxLimits::kCpuTimeLimitSeconds};
     setrlimit(RLIMIT_CPU, &cpu_limit);
-    struct rlimit mem_limit{50 * 1024 * 1024, 50 * 1024 * 1024};
+    struct rlimit mem_limit{SandboxLimits::kMemoryLimitBytes,
+                            SandboxLimits::kMemoryLimitBytes};
     setrlimit(RLIMIT_AS, &mem_limit);
   }
 
@@ -170,11 +172,11 @@ class ProcessRunner {
       read_from(stdout_fd, true, stdout_open);
       read_from(stderr_fd, false, stderr_open);
 
-      if (total_bytes >= SandboxedProcess::kMaxOutputBytes) {
+      if (total_bytes >= SandboxLimits::kMaxOutputBytes) {
         kill(child_pid, SIGKILL);
         truncated = true;
         callback("", absl::StrFormat("\n[Output truncated: exceeded %zu KB limit]\n",
-                                    SandboxedProcess::kMaxOutputBytes / 1024));
+                                    SandboxLimits::kMaxOutputBytes / 1024));
         break;
       }
     }

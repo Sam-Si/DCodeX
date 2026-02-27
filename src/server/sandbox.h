@@ -88,13 +88,17 @@ class CppExecutionStrategy : public ExecutionStrategy {
   absl::string_view GetStrategyId() const override { return "cpp"; }
 };
 
+// Centralized configuration for sandboxed resource limits.
+struct SandboxLimits {
+  static constexpr int kCpuTimeLimitSeconds = 1;
+  static constexpr int kWallClockTimeoutSeconds = 2;
+  static constexpr size_t kMemoryLimitBytes = 25 * 1024 * 1024;
+  static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
+};
+
 // Orchestrator class that manages sandboxed execution and caching.
 class SandboxedProcess {
  public:
-  // Maximum combined stdout+stderr output in bytes before the process is
-  // killed and the output is truncated.
-  static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
-
   // Compiles and runs code with caching support.
   [[nodiscard]] static ExecutionResult CompileAndRunStreaming(
       absl::string_view code, absl::string_view stdin_data,
