@@ -61,7 +61,7 @@ build:docker --worker_max_instances=4
 # 3. Reduce I/O operations (fewer symlinks, fewer writes)
 build:docker --nobuild_runfile_links
 build:docker --linkopt=-S
-build:docker --experimental_strict_action_env
+build:docker --incompatible_strict_action_env
 
 # ============================================================
 # 6. MACOS NATIVE CONFIG (--config=macos)
