@@ -48,7 +48,14 @@ class OutputFilterStrategy {
 class DefaultOutputFilterStrategy final : public OutputFilterStrategy {
  public:
   bool ShouldSuppress(absl::string_view chunk) const override {
-    return chunk.find("rosetta error:") != absl::string_view::npos;
+    if (chunk.find("rosetta error:") != absl::string_view::npos) {
+      return true;
+    }
+    // Handle cases where the message might be slightly different or fragmented
+    if (chunk.find("mmap_anonymous_rw mmap failed") != absl::string_view::npos) {
+      return true;
+    }
+    return false;
   }
 };
 
@@ -270,7 +277,8 @@ ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
   TempFileManager::Guard binary_guard(binary_path);
 
   // Use SandboxedProcess helper for command execution
-  auto run_cmd = [&](const std::vector<std::string>& argv, absl::string_view input, bool sandboxed) {
+  auto run_cmd = [&](const std::vector<std::string>& argv, absl::string_view input, bool sandboxed,
+                     const OutputCallback& cmd_callback) {
     PipePair stdin_p, stdout_p, stderr_p;
     if (!stdin_p.Create() || !stdout_p.Create() || !stderr_p.Create()) return ExecutionResult{false, "Pipe creation failed"};
 
@@ -298,7 +306,7 @@ ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
     }
 
     bool truncated = false;
-    ProcessRunner::ReadOutput(stdout_p.ReadFd(), stderr_p.ReadFd(), pid, callback, truncated);
+    ProcessRunner::ReadOutput(stdout_p.ReadFd(), stderr_p.ReadFd(), pid, cmd_callback, truncated);
 
     int status = 0; struct rusage usage{};
     bool timed_out = false;
@@ -317,11 +325,19 @@ ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
   };
 
   // Compile
-  ExecutionResult comp_res = run_cmd({"g++", "-std=c++17", source_file, "-o", binary_path}, "", false);
-  if (!comp_res.success) return comp_res;
+  auto null_cb = [](absl::string_view, absl::string_view) {};
+  ExecutionResult comp_res = run_cmd({"g++", "-std=c++17", source_file, "-o", binary_path}, "", false, null_cb);
+  if (!comp_res.success) {
+    // If compilation fails, we might want to see the errors, so we run it again with the real callback
+    // or we could have just passed the real callback to begin with.
+    // Given the user's request to fix the Rosetta error appearing in ALL examples,
+    // and since compilation also runs via run_cmd, let's make sure run_cmd itself
+    // handles the callback correctly.
+    return run_cmd({"g++", "-std=c++17", source_file, "-o", binary_path}, "", false, callback);
+  }
 
   // Run
-  return run_cmd({binary_path}, stdin_data, true);
+  return run_cmd({binary_path}, stdin_data, true, callback);
 }
 
 // --- SandboxedProcess Implementation ---
