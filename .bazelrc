@@ -56,12 +56,14 @@ build:docker --genrule_strategy=local
 
 # 2. Caching & Persistence
 build:docker --disk_cache=/tmp/bazel-disk-cache
-build:docker --worker_max_instances=4
+build:docker --worker_max_instances=8
 
-# 3. Reduce I/O operations (fewer symlinks, fewer writes)
+# 3. Reduce I/O & Link Time
 build:docker --nobuild_runfile_links
-build:docker --linkopt=-S
 build:docker --incompatible_strict_action_env
+build:docker --strip=never
+build:docker --linkopt=-fuse-ld=gold
+build:docker --nowatchfs
 
 # ============================================================
 # 6. MACOS NATIVE CONFIG (--config=macos)
