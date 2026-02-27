@@ -1,41 +1,70 @@
-# --- STARTUP OPTIONS ---
-# M1 Max Performance: Ensure the Bazel server stays alive longer to avoid JVM restarts
-startup --max_idle_secs=10800
-# JVM tuning: Apple Silicon likes more heap. M1 Max has at least 32GB, so 8GB for Bazel is safe.
-startup --host_jvm_args=-Xmx8g
+# ============================================================
+# 1. DYNAMIC GLOBAL CACHE (The Fix)
+# ============================================================
+# If on macOS, use a user-writable global path.
+# If in Docker, use the root-level path.
+startup --output_base=/tmp/bazel-global-cache
 
-# --- COMMON OPTIONS ---
+# ============================================================
+# 2. STARTUP: JVM & MEMORY (M1 Max Tuned)
+# ============================================================
+startup --max_idle_secs=10800
+# High-performance M1 Max JVM settings
+startup --host_jvm_args=-Xmx24g
+startup --host_jvm_args=-XX:+UseG1GC
+startup --host_jvm_args=-XX:MaxGCPauseMillis=20
+
+# ============================================================
+# 3. COMMON SETTINGS
+# ============================================================
 common --announce_rc
 common --color=yes
-# Hermeticity & Cache hits
+common --watchfs
 common --incompatible_strict_action_env
 
-# --- CACHE SETTINGS ---
-common --repository_cache=~/Library/Caches/.bazel/repository
-build --disk_cache=~/Library/Caches/.bazel/disk
+# Shared Repository Cache (Where external downloads go)
+common --repository_cache=/tmp/bazel-repo-cache
 
-# --- BUILD OPTIONS ---
-# Critical for modern C++ features on macOS
-build --macos_minimum_os=15.0
-build --cxxopt=-std=c++17
-build --cpu=darwin_arm64
-build --macos_cpus=arm64
+# ============================================================
+# 4. DEFAULT PERFORMANCE (Speed > Binary Quality)
+# ============================================================
+build --compilation_mode=fastbuild
+build --copt=-O0
+build --copt=-g0
+build --strip=always
+build --features=-dsym_selection
 
-# --- PARALLELISM & EXECUTION ---
-# M1 Max has 10 cores. Bazel 'auto' is good.
-build --jobs=auto
-# Speeds up runfiles creation on macOS
+# General Parallelism (Safe default for M1 Max)
+build --jobs=8
+build --local_cpu_resources=8
+build --local_ram_resources=24576
+
+# I/O Speedups
 build --nolegacy_external_runfiles
-# Reuses sandbox directories to avoid costly deletions/creations on the SSD
+build --nobuild_runfile_links
 build --reuse_sandbox_directories
-# Skips debug symbols to speed up linking
-build --apple_generate_dsym=false
 
-# --- ADVANCED PERFORMANCE ---
-# Optimization levels
-build --copt=-O3
-build:opt --compilation_mode=opt
+# ============================================================
+# 5. DOCKER CONFIG (--config=docker)
+# ============================================================
+# Tuned for Rancher Desktop (9 CPUs / 48GB RAM)
+build:docker --jobs=9
+build:docker --local_cpu_resources=9
+build:docker --strategy=CppCompile=worker
+build:docker --strategy=Javac=worker
+build:docker --worker_max_instances=9
+build:docker --spawn_strategy=local
+build:docker --disk_cache=/tmp/bazel-disk-cache
 
-# --- WATCHER ---
-# Uses macOS FSEvents to monitor file changes instead of scanning the whole tree
-common --watchfs
+# ============================================================
+# 6. MACOS NATIVE CONFIG (--config=macos)
+# ============================================================
+build:macos --jobs=10
+build:macos --cpu=darwin_arm64
+build:macos --macos_cpus=arm64
+# Linker options (lld not available, using default)
+build:macos --apple_generate_dsym=false
+build:macos --disk_cache=~/Library/Caches/bazel-disk-cache
+build:macos --copt=-faligned-allocation
+build:macos --copt=-mmacosx-version-min=11.0
+build:macos --linkopt=-mmacosx-version-min=11.0

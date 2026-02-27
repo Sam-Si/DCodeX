@@ -563,40 +563,44 @@ void RunTimeoutWatcher(pid_t child_pid, int timeout_seconds) {
 [[nodiscard]] bool WaitWithTimeout(pid_t child_pid, pid_t watcher_pid,
                                     int& child_status,
                                     struct rusage& child_usage) {
-  bool timeout_occurred = false;
-
-  while (true) {
-    // Wait for any child (either the sandboxed process or the watcher).
-    // We use wait4 so we can collect rusage for the sandboxed child.
-    struct rusage usage_tmp{};
-    int status_tmp = 0;
-    pid_t finished_pid = wait4(-1, &status_tmp, 0, &usage_tmp);
-
-    if (finished_pid <= 0) {
-      // No more children or error — stop waiting.
-      break;
-    }
-
-    if (finished_pid == child_pid) {
-      // Sandboxed child finished before the timeout watcher fired.
-      child_status = status_tmp;
-      child_usage = usage_tmp;
-      // Kill the watcher to prevent it from firing after the child is gone.
-      kill(watcher_pid, SIGKILL);
-      waitpid(watcher_pid, nullptr, 0);
-      break;
-    } else if (finished_pid == watcher_pid) {
-      // Watcher exited — it sent SIGKILL to the child because the wall-clock
-      // timeout elapsed.
-      timeout_occurred = true;
-      // Collect the child's exit status and resource usage.
-      wait4(child_pid, &child_status, 0, &child_usage);
-      break;
-    }
-    // Some other unexpected child — ignore and keep waiting.
+  // Wait for the sandboxed child process.
+  if (wait4(child_pid, &child_status, 0, &child_usage) == -1) {
+    return false;
   }
 
-  return timeout_occurred;
+  // The child has finished. Check if it was killed by a signal.
+  bool killed_by_sigkill = WIFSIGNALED(child_status) && WTERMSIG(child_status) == SIGKILL;
+
+  // Now we need to determine if it was the watcher that killed it.
+  // We'll wait a very short time for the watcher to finish its exit if it's the one that killed us.
+  int watcher_status = 0;
+  pid_t reaped_watcher = 0;
+  
+  // If it was killed by SIGKILL, it's very likely the watcher (or output truncation, 
+  // which is handled by the caller checking output_truncated).
+  // We'll give the watcher a moment to exit.
+  for (int i = 0; i < 10; ++i) {
+    reaped_watcher = waitpid(watcher_pid, &watcher_status, WNOHANG);
+    if (reaped_watcher == watcher_pid) break;
+    usleep(1000); // 1ms
+  }
+
+  if (reaped_watcher == watcher_pid) {
+    // Watcher finished. If it finished on its own (not killed by us), it means it timed out.
+    // In RunTimeoutWatcher, it exits with _exit(0) after sending SIGKILL.
+    if (WIFEXITED(watcher_status) && WEXITSTATUS(watcher_status) == 0 && killed_by_sigkill) {
+      return true;
+    }
+  }
+
+  // If we're here, either the child finished on its own or it was killed by something else
+  // (like output truncation). Clean up the watcher if it's still running.
+  if (reaped_watcher == 0) {
+    kill(watcher_pid, SIGKILL);
+    waitpid(watcher_pid, nullptr, 0);
+  }
+
+  return false;
 }
 
 SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(
