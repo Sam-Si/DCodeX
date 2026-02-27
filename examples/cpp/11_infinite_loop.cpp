@@ -1,6 +1,6 @@
 // Standard C++ Time Limit Exceeded Example
 // This program runs a long computation with periodic I/O to simulate real workload
-// The sandbox has a 2-second CPU time limit
+// The sandbox has a 1-second CPU time limit (see SandboxLimits in src/server/sandbox.h)
 
 #include <chrono>
 #include <iostream>
