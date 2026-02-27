@@ -16,7 +16,11 @@
 #define SRC_SERVER_SANDBOX_H_
 
 #include <functional>
+#include <memory>
+#include <string>
+#include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -24,48 +28,75 @@
 
 namespace dcodex {
 
+// Resource statistics for a sandboxed process.
+struct ResourceStats {
+  // Peak memory usage in bytes.
+  long peak_memory_bytes = 0;
+  // User CPU time in milliseconds.
+  long user_time_ms = 0;
+  // System CPU time in milliseconds.
+  long system_time_ms = 0;
+  // Total elapsed time in milliseconds.
+  long elapsed_time_ms = 0;
+};
+
+// Result of a sandboxed execution.
+struct ExecutionResult {
+  bool success = false;
+  std::string error_message;
+  ResourceStats stats;
+  // Indicates if result was served from cache.
+  bool cache_hit = false;
+  // Cached stdout/stderr for cache hits.
+  std::string cached_stdout;
+  std::string cached_stderr;
+  // Indicates if the process was killed due to wall-clock timeout.
+  bool wall_clock_timeout = false;
+  // Indicates if the process was killed because its combined stdout+stderr
+  // output exceeded kMaxOutputBytes.
+  bool output_truncated = false;
+};
+
+// Callback for streaming output.
+using OutputCallback =
+    std::function<void(absl::string_view stdout_chunk,
+                       absl::string_view stderr_chunk)>;
+
+// Strategy Pattern: Interface for different execution strategies (e.g., C++, Python).
+class ExecutionStrategy {
+ public:
+  virtual ~ExecutionStrategy() = default;
+
+  // Executes the given code and returns the result.
+  virtual ExecutionResult Execute(absl::string_view code,
+                                  absl::string_view stdin_data,
+                                  OutputCallback callback) = 0;
+
+  // Returns a unique identifier for this strategy (used for caching).
+  virtual absl::string_view GetStrategyId() const = 0;
+};
+
+// C++ implementation of the ExecutionStrategy.
+class CppExecutionStrategy : public ExecutionStrategy {
+ public:
+  CppExecutionStrategy() = default;
+  ~CppExecutionStrategy() override = default;
+
+  ExecutionResult Execute(absl::string_view code, absl::string_view stdin_data,
+                          OutputCallback callback) override;
+
+  absl::string_view GetStrategyId() const override { return "cpp"; }
+};
+
+// Orchestrator class that manages sandboxed execution and caching.
 class SandboxedProcess {
  public:
-  struct ResourceStats {
-    // Peak memory usage in bytes.
-    long peak_memory_bytes;
-    // User CPU time in milliseconds.
-    long user_time_ms;
-    // System CPU time in milliseconds.
-    long system_time_ms;
-    // Total elapsed time in milliseconds.
-    long elapsed_time_ms;
-  };
-
-  struct Result {
-    bool success;
-    std::string error_message;
-    ResourceStats stats;
-    // Indicates if result was served from cache.
-    bool cache_hit = false;
-    // Cached stdout/stderr for cache hits.
-    std::string cached_stdout;
-    std::string cached_stderr;
-    // Indicates if the process was killed due to wall-clock timeout.
-    bool wall_clock_timeout = false;
-    // Indicates if the process was killed because its combined stdout+stderr
-    // output exceeded kMaxOutputBytes.
-    bool output_truncated = false;
-  };
-
   // Maximum combined stdout+stderr output in bytes before the process is
-  // killed and the output is truncated.  10 KB is small enough for demos
-  // while still protecting against runaway printers.
+  // killed and the output is truncated.
   static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
 
-  using OutputCallback =
-      std::function<void(absl::string_view stdout_chunk,
-                         absl::string_view stderr_chunk)>;
-
   // Compiles and runs code with caching support.
-  // Returns cached result if available, otherwise executes and caches.
-  // stdin_data is fed to the program's stdin; empty string means EOF at start.
-  [[nodiscard]] static Result CompileAndRunStreaming(
+  [[nodiscard]] static ExecutionResult CompileAndRunStreaming(
       absl::string_view code, absl::string_view stdin_data,
       OutputCallback callback);
 
@@ -76,18 +107,10 @@ class SandboxedProcess {
   static void ClearCache();
 
  private:
-  [[nodiscard]] static std::string WriteTempFile(absl::string_view extension,
-                                                  absl::string_view content);
-  // stdin_data is written to the child's stdin pipe.
-  // For compilation (sandboxed=false) stdin_data is always empty.
-  [[nodiscard]] static Result ExecuteCommandStreaming(
-      absl::Span<const std::string> argv, absl::string_view stdin_data,
-      OutputCallback callback, bool sandboxed = false);
-
   // Internal execution without caching.
-  [[nodiscard]] static Result ExecuteWithoutCache(absl::string_view code,
-                                                   absl::string_view stdin_data,
-                                                   OutputCallback callback);
+  [[nodiscard]] static ExecutionResult ExecuteWithStrategy(
+      ExecutionStrategy& strategy, absl::string_view code,
+      absl::string_view stdin_data, OutputCallback callback);
 };
 
 }  // namespace dcodex

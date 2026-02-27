@@ -80,10 +80,10 @@ class ExecutionReactorState {
   void SetWriting(bool writing) { writing_ = writing; }
 
   // Sets resource statistics.
-  void SetStats(const SandboxedProcess::ResourceStats& stats) { stats_ = stats; }
+  void SetStats(const ResourceStats& stats) { stats_ = stats; }
 
   // Gets resource statistics.
-  const SandboxedProcess::ResourceStats& GetStats() const { return stats_; }
+  const ResourceStats& GetStats() const { return stats_; }
 
   // Sets cache hit flag.
   void SetCacheHit(bool cache_hit) { cache_hit_ = cache_hit; }
@@ -111,7 +111,7 @@ class ExecutionReactorState {
   bool cache_hit_ = false;
   bool wall_clock_timeout_ = false;
   bool output_truncated_ = false;
-  SandboxedProcess::ResourceStats stats_;
+  ResourceStats stats_;
 };
 
 // Handles rejection when too many sandboxes are active.
@@ -188,7 +188,7 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
   }
 
   // Handles completion of execution.
-  void HandleExecutionComplete(const SandboxedProcess::Result& result) {
+  void HandleExecutionComplete(const ExecutionResult& result) {
     absl::MutexLock lock(&mutex_);
     state_.SetStats(result.stats);
     state_.SetCacheHit(result.cache_hit);

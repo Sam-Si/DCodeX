@@ -60,9 +60,8 @@ build:docker --worker_max_instances=8
 
 # 3. Reduce I/O & Link Time
 build:docker --nobuild_runfile_links
-build:docker --incompatible_strict_action_env
+build:docker --action_env=PATH
 build:docker --strip=never
-build:docker --linkopt=-fuse-ld=gold
 build:docker --nowatchfs
 
 # ============================================================
