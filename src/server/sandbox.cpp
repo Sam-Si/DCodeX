@@ -38,6 +38,25 @@ namespace dcodex {
 
 namespace {
 
+// --- SRP: Output Filtering ---
+class OutputFilterStrategy {
+ public:
+  virtual ~OutputFilterStrategy() = default;
+  virtual bool ShouldSuppress(absl::string_view chunk) const = 0;
+};
+
+class DefaultOutputFilterStrategy final : public OutputFilterStrategy {
+ public:
+  bool ShouldSuppress(absl::string_view chunk) const override {
+    return chunk.find("rosetta error:") != absl::string_view::npos;
+  }
+};
+
+const OutputFilterStrategy& GetOutputFilter() {
+  static DefaultOutputFilterStrategy filter;
+  return filter;
+}
+
 // --- SRP: Resource Monitoring Constants ---
 constexpr int kWallClockTimeoutSeconds = SandboxLimits::kWallClockTimeoutSeconds;
 
@@ -160,11 +179,19 @@ class ProcessRunner {
       auto read_from = [&](int fd, bool is_stdout, bool& open_flag) {
         if (open_flag && FD_ISSET(fd, &read_fds)) {
           ssize_t n = read(fd, buffer.data(), buffer.size());
-          if (n <= 0) { open_flag = false; }
-          else {
+          if (n <= 0) {
+            open_flag = false;
+          } else {
             total_bytes += n;
-            if (is_stdout) callback(absl::string_view(buffer.data(), n), "");
-            else callback("", absl::string_view(buffer.data(), n));
+            absl::string_view chunk(buffer.data(), static_cast<size_t>(n));
+            if (is_stdout) {
+              callback(chunk, "");
+            } else {
+              if (GetOutputFilter().ShouldSuppress(chunk)) {
+                return;
+              }
+              callback("", chunk);
+            }
           }
         }
       };
