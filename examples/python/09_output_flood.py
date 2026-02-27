@@ -7,7 +7,7 @@ the sandbox's 10 KB combined output size limit.
 Each iteration prints a ~500-character line, so the 10 KB cap is crossed
 after roughly 20 iterations.  The sandbox kills the process at that point,
 appends a truncation notice, and sets output_truncated = true in the result.
-The wall-clock timeout (5 s) is NOT what stops this program — the output
+The wall-clock timeout (2 s) is NOT what stops this program — the output
 limit fires first, well under 1 second.
 """
 

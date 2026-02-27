@@ -11,6 +11,7 @@
 // Example stdin_data:
 //   "DCodeX\n5\n10\n20\n30\n40\n50\n"
 
+#include <algorithm>
 #include <iostream>
 #include <numeric>
 #include <string>
