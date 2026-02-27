@@ -46,6 +46,8 @@ class ExecutionResult:
     execution_time: float
     cache_hit: bool
     actual_time: float
+    wall_clock_timeout: bool = False
+    output_truncated: bool = False
 
 
 def format_bytes(bytes_val: int) -> str:
@@ -89,7 +91,8 @@ def format_duration(ms: float) -> str:
 def execute_code(
     stub: Any,
     code: str,
-    description: str = ""
+        description: str = "",
+        stdin_data: str = "",
 ) -> ExecutionResult:
     """Execute code and return results with timing.
     
@@ -97,11 +100,15 @@ def execute_code(
         stub: gRPC stub for the CodeExecutor service.
         code: C++ code to execute.
         description: Optional description of the code.
+        stdin_data: Data to feed to the program's standard input.
+                    Empty string means the program receives EOF immediately.
         
     Returns:
         ExecutionResult containing stdout, stderr, timing, and cache status.
     """
-    request: Any = sandbox_pb2.CodeRequest(language="cpp", code=code)
+    request: Any = sandbox_pb2.CodeRequest(
+        language="cpp", code=code, stdin_data=stdin_data
+    )
     
     start_time = time.time()
     responses: Iterator[Any] = stub.Execute(request)
@@ -109,6 +116,8 @@ def execute_code(
     peak_memory = 0
     execution_time = 0.0
     cache_hit = False
+    wall_clock_timeout = False
+    output_truncated = False
     stdout_output: List[str] = []
     stderr_output: List[str] = []
     
@@ -122,6 +131,10 @@ def execute_code(
         if response.execution_time_ms > 0:
             execution_time = response.execution_time_ms
         cache_hit = response.cache_hit
+        if response.wall_clock_timeout:
+            wall_clock_timeout = True
+        if response.output_truncated:
+            output_truncated = True
     
     actual_time = (time.time() - start_time) * 1000  # Convert to ms
     
@@ -131,7 +144,9 @@ def execute_code(
         peak_memory=peak_memory,
         execution_time=execution_time,
         cache_hit=cache_hit,
-        actual_time=actual_time
+        actual_time=actual_time,
+        wall_clock_timeout=wall_clock_timeout,
+        output_truncated=output_truncated,
     )
 
 
@@ -154,6 +169,10 @@ def print_results(results: ExecutionResult, show_output: bool = True) -> None:
     print(f"   🌐 Network Time: {format_duration(results.actual_time)}")
     cache_status = "⚡ CACHE HIT" if results.cache_hit else "🆕 Fresh Execution"
     print(f"   {cache_status}")
+    if results.wall_clock_timeout:
+        print("   ⏰ WALL-CLOCK TIMEOUT (process killed by sandbox)")
+    if results.output_truncated:
+        print("   ✂️  OUTPUT TRUNCATED (exceeded 10 KB combined output limit)")
     print("=" * 50)
 
 
@@ -202,7 +221,8 @@ def read_codes_from_directory(directory: Path) -> Dict[str, str]:
 def execute_single_code(
     stub: Any,
     name: str,
-    code: str
+        code: str,
+        stdin_data: str = "",
 ) -> None:
     """Execute a single code example and print results.
     
@@ -210,10 +230,11 @@ def execute_single_code(
         stub: gRPC stub for the CodeExecutor service.
         name: Name/description of the code example.
         code: C++ code to execute.
+        stdin_data: Data to feed to the program's standard input.
     """
     print(f"\n📝 {name}")
     print("=" * 50)
-    results = execute_code(stub, code, name)
+    results = execute_code(stub, code, name, stdin_data=stdin_data)
     print_results(results)
 
 
@@ -459,8 +480,39 @@ def main() -> None:
         action="store_true",
         help="Run each file twice to demonstrate caching"
     )
+    parser.add_argument(
+        "--stdin",
+        default="",
+        help=(
+            "Data to pass to the program's standard input. "
+            "Use \\n for newlines, e.g. --stdin 'Alice\\n3\\n10\\n20\\n30\\n'. "
+            "Only used with --file."
+        )
+    )
+    parser.add_argument(
+        "--stdin-file",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a file whose contents are passed to the program's stdin. "
+            "Only used with --file. Takes precedence over --stdin."
+        )
+    )
     
     args = parser.parse_args()
+
+    # Resolve stdin_data: --stdin-file takes precedence over --stdin.
+    stdin_data: str = ""
+    if args.stdin_file:
+        try:
+            stdin_data = args.stdin_file.read_text(encoding="utf-8")
+        except (FileNotFoundError, IOError) as e:
+            print(f"Error reading stdin file: {e}")
+            sys.exit(1)
+    elif args.stdin:
+        # Allow the user to write \n literally on the command line and have it
+        # interpreted as a real newline character.
+        stdin_data = args.stdin.replace("\\n", "\n")
     
     # Connect to server
     channel = grpc.insecure_channel(args.server)
@@ -470,7 +522,7 @@ def main() -> None:
         # Execute specific file
         try:
             code = read_code_from_file(args.file)
-            execute_single_code(stub, args.file.stem, code)
+            execute_single_code(stub, args.file.stem, code, stdin_data=stdin_data)
         except (FileNotFoundError, IOError) as e:
             print(f"Error: {e}")
             sys.exit(1)

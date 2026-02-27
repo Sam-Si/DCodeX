@@ -46,7 +46,17 @@ class SandboxedProcess {
     // Cached stdout/stderr for cache hits.
     std::string cached_stdout;
     std::string cached_stderr;
+    // Indicates if the process was killed due to wall-clock timeout.
+    bool wall_clock_timeout = false;
+    // Indicates if the process was killed because its combined stdout+stderr
+    // output exceeded kMaxOutputBytes.
+    bool output_truncated = false;
   };
+
+  // Maximum combined stdout+stderr output in bytes before the process is
+  // killed and the output is truncated.  10 KB is small enough for demos
+  // while still protecting against runaway printers.
+  static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
 
   using OutputCallback =
       std::function<void(absl::string_view stdout_chunk,
@@ -54,8 +64,10 @@ class SandboxedProcess {
 
   // Compiles and runs code with caching support.
   // Returns cached result if available, otherwise executes and caches.
+  // stdin_data is fed to the program's stdin; empty string means EOF at start.
   [[nodiscard]] static Result CompileAndRunStreaming(
-      absl::string_view code, OutputCallback callback);
+      absl::string_view code, absl::string_view stdin_data,
+      OutputCallback callback);
 
   // Accesses the global execution cache.
   [[nodiscard]] static ExecutionCache& GetCache();
@@ -66,12 +78,15 @@ class SandboxedProcess {
  private:
   [[nodiscard]] static std::string WriteTempFile(absl::string_view extension,
                                                   absl::string_view content);
+  // stdin_data is written to the child's stdin pipe.
+  // For compilation (sandboxed=false) stdin_data is always empty.
   [[nodiscard]] static Result ExecuteCommandStreaming(
-      absl::Span<const std::string> argv, OutputCallback callback,
-      bool sandboxed = false);
+      absl::Span<const std::string> argv, absl::string_view stdin_data,
+      OutputCallback callback, bool sandboxed = false);
 
   // Internal execution without caching.
   [[nodiscard]] static Result ExecuteWithoutCache(absl::string_view code,
+                                                   absl::string_view stdin_data,
                                                    OutputCallback callback);
 };
 

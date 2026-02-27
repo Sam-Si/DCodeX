@@ -9,6 +9,9 @@ service CodeExecutor {
 message CodeRequest {
   string language = 1;
   string code = 2;
+  // Optional data to feed to the program's standard input (stdin).
+  // If empty, the process receives EOF on stdin immediately.
+  string stdin_data = 3;
 }
 
 message ExecutionLog {
@@ -19,4 +22,11 @@ message ExecutionLog {
   float execution_time_ms = 4;
   // Cache status
   bool cache_hit = 5;
+  // Set to true when the process was forcibly terminated because it exceeded
+  // the wall-clock timeout (kWallClockTimeoutSeconds on the server).
+  bool wall_clock_timeout = 6;
+  // Set to true when the combined stdout+stderr output exceeded the server's
+  // output size limit (kMaxOutputBytes).  The process is killed at that point
+  // and a truncation notice is appended to the output.
+  bool output_truncated = 7;
 }
