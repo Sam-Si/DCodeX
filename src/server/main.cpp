@@ -91,12 +91,26 @@ class ExecutionReactorState {
   // Gets cache hit flag.
   bool IsCacheHit() const { return cache_hit_; }
 
+  // Sets wall-clock timeout flag.
+  void SetWallClockTimeout(bool timed_out) { wall_clock_timeout_ = timed_out; }
+
+  // Gets wall-clock timeout flag.
+  bool IsWallClockTimeout() const { return wall_clock_timeout_; }
+
+  // Sets output truncated flag.
+  void SetOutputTruncated(bool truncated) { output_truncated_ = truncated; }
+
+  // Gets output truncated flag.
+  bool IsOutputTruncated() const { return output_truncated_; }
+
  private:
   std::queue<ExecutionLog> queue_;
   bool finished_ = false;
   bool writing_ = false;
   bool stats_sent_ = false;
   bool cache_hit_ = false;
+  bool wall_clock_timeout_ = false;
+  bool output_truncated_ = false;
   SandboxedProcess::ResourceStats stats_;
 };
 
@@ -150,6 +164,7 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
   void ExecuteInBackground() {
     auto result = SandboxedProcess::CompileAndRunStreaming(
         request_->code(),
+        request_->stdin_data(),
         [this](absl::string_view stdout_chunk, absl::string_view stderr_chunk) {
           HandleExecutionOutput(stdout_chunk, stderr_chunk);
         });
@@ -177,7 +192,16 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
     absl::MutexLock lock(&mutex_);
     state_.SetStats(result.stats);
     state_.SetCacheHit(result.cache_hit);
+    state_.SetWallClockTimeout(result.wall_clock_timeout);
+    state_.SetOutputTruncated(result.output_truncated);
     state_.MarkFinished();
+    // If the process was killed by the wall-clock timeout, stream a stderr
+    // chunk so the client sees a clear human-readable message.
+    if (result.wall_clock_timeout) {
+      ExecutionLog timeout_log;
+      timeout_log.set_stderr_chunk(result.error_message + "\n");
+      state_.QueueLog(timeout_log);
+    }
     MaybeWriteNext();
   }
 
@@ -212,6 +236,8 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
     stats_log.set_execution_time_ms(
         static_cast<float>(state_.GetStats().elapsed_time_ms));
     stats_log.set_cache_hit(state_.IsCacheHit());
+    stats_log.set_wall_clock_timeout(state_.IsWallClockTimeout());
+    stats_log.set_output_truncated(state_.IsOutputTruncated());
     current_log_ = stats_log;
     StartWrite(&current_log_);
   }

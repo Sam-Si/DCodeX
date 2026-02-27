@@ -15,6 +15,7 @@
 #include "src/server/sandbox.h"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/time.h>
@@ -183,6 +184,9 @@ class TempFile {
   std::filesystem::path path_;
 };
 
+// Wall-clock timeout in seconds for sandboxed execution.
+constexpr int kWallClockTimeoutSeconds = 5;
+
 // Helper to set resource limits for sandboxed execution.
 void ApplyResourceLimits() {
   struct rlimit cpu_limit;
@@ -215,7 +219,8 @@ void RedirectFileDescriptors(int stdout_write_fd, int stderr_write_fd) {
 }
 
 // Helper to read from a pipe and invoke callback.
-[[nodiscard]] bool ReadFromPipe(
+// Returns the number of bytes read (> 0), 0 on EOF, or -1 on error.
+[[nodiscard]] ssize_t ReadFromPipe(
     int fd, std::array<char, 4096>& buffer,
     const SandboxedProcess::OutputCallback& callback, bool is_stdout) {
   ssize_t bytes = read(fd, buffer.data(), buffer.size());
@@ -225,9 +230,8 @@ void RedirectFileDescriptors(int stdout_write_fd, int stderr_write_fd) {
     } else {
       callback("", absl::string_view(buffer.data(), bytes));
     }
-    return true;
   }
-  return false;
+  return bytes;
 }
 
 // Helper to compute resource statistics from rusage.
@@ -295,12 +299,18 @@ void StoreCacheResult(const std::string& code_hash,
 }
 
 SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(
-    absl::string_view code, OutputCallback callback) {
-  // Computes hash of the code.
-  auto hash_result = ExecutionCache::ComputeHash(code);
+    absl::string_view code, absl::string_view stdin_data,
+    OutputCallback callback) {
+  // The cache key must incorporate both the source code and the stdin data,
+  // because the same code with different stdin produces different output.
+  // We concatenate them with a NUL byte separator (NUL cannot appear in valid
+  // UTF-8 source code) before hashing.
+  std::string cache_input = absl::StrCat(code, absl::string_view("\0", 1),
+                                         stdin_data);
+  auto hash_result = ExecutionCache::ComputeHash(cache_input);
   if (!hash_result.ok()) {
     // Hash computation failed, executes without caching.
-    return ExecuteWithoutCache(code, callback);
+    return ExecuteWithoutCache(code, stdin_data, callback);
   }
   const std::string& code_hash = hash_result.value();
 
@@ -328,7 +338,7 @@ SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(
   };
 
   SandboxedProcess::Result result =
-      ExecuteWithoutCache(code, wrapping_callback);
+      ExecuteWithoutCache(code, stdin_data, wrapping_callback);
 
   // Stores in cache if execution was successful.
   if (result.success) {
@@ -339,10 +349,14 @@ SandboxedProcess::Result SandboxedProcess::CompileAndRunStreaming(
 }
 
 SandboxedProcess::Result SandboxedProcess::ExecuteWithoutCache(
-    absl::string_view code, OutputCallback callback) {
+    absl::string_view code, absl::string_view stdin_data,
+    OutputCallback callback) {
   std::string source_file = WriteTempFile(".cpp", code);
   if (source_file.empty()) {
-    return {false, "Failed to create source file", {}};
+    SandboxedProcess::Result r;
+    r.success = false;
+    r.error_message = "Failed to create source file";
+    return r;
   }
 
   TempFile source_guard(source_file);
@@ -352,19 +366,19 @@ SandboxedProcess::Result SandboxedProcess::ExecuteWithoutCache(
     std::filesystem::remove(binary_path, ec);
   };
 
-  // Compilation step (not sandboxed, captures output via callback).
+  // Compilation step (not sandboxed, no stdin needed for the compiler).
   absl::InlinedVector<std::string, 4> compile_args = {
       "g++", "-std=c++17", source_file, "-o", binary_path.string()};
   Result compile_result = ExecuteCommandStreaming(
-      absl::MakeSpan(compile_args), callback, false);
+      absl::MakeSpan(compile_args), /*stdin_data=*/"", callback, false);
   if (!compile_result.success) {
     return compile_result;
   }
 
-  // Execution step (sandboxed).
+  // Execution step (sandboxed) — forward the caller-supplied stdin_data.
   absl::InlinedVector<std::string, 2> run_args = {binary_path.string()};
-  Result run_result =
-      ExecuteCommandStreaming(absl::MakeSpan(run_args), callback, true);
+  Result run_result = ExecuteCommandStreaming(
+      absl::MakeSpan(run_args), stdin_data, callback, true);
 
   return run_result;
 }
@@ -383,12 +397,17 @@ std::string SandboxedProcess::WriteTempFile(absl::string_view extension,
 }
 
 // Handles the child process execution setup.
+// stdin_read_fd is the read end of the stdin pipe; it is dup2'd onto
+// STDIN_FILENO so the child reads from it instead of the terminal.
 void ExecuteChildProcess(absl::Span<const std::string> argv,
-                         int stdout_write_fd, int stderr_write_fd,
-                         bool sandboxed) {
+                         int stdin_read_fd, int stdout_write_fd,
+                         int stderr_write_fd, bool sandboxed) {
   if (sandboxed) {
     ApplyResourceLimits();
   }
+
+  // Redirect stdin from the pipe.
+  dup2(stdin_read_fd, STDIN_FILENO);
 
   RedirectFileDescriptors(stdout_write_fd, stderr_write_fd);
 
@@ -398,11 +417,26 @@ void ExecuteChildProcess(absl::Span<const std::string> argv,
 }
 
 // Handles reading output from child process pipes.
-void ReadProcessOutput(int stdout_read_fd, int stderr_read_fd,
-                       const SandboxedProcess::OutputCallback& callback) {
+//
+// Uses a short select() timeout so that a sleeping or hung process that has
+// closed its own output (or never produces output) does not block the parent
+// indefinitely.  The loop exits as soon as both pipe read-ends reach EOF,
+// which happens when the child process exits (or is killed).
+//
+// Output size limiting: the combined byte count of stdout and stderr is
+// tracked across every read.  When the total exceeds kMaxOutputBytes the
+// child is killed immediately with SIGKILL, a human-readable truncation
+// notice is emitted as a stderr chunk, and the loop exits.
+//
+// Returns true if the output was truncated, false otherwise.
+[[nodiscard]] bool ReadProcessOutput(
+    int stdout_read_fd, int stderr_read_fd, pid_t child_pid,
+    const SandboxedProcess::OutputCallback& callback) {
   std::array<char, 4096> buffer{};
   bool stdout_open = true;
   bool stderr_open = true;
+  size_t total_output_bytes = 0;
+  bool truncated = false;
 
   while (stdout_open || stderr_open) {
     fd_set read_fds;
@@ -420,16 +454,56 @@ void ReadProcessOutput(int stdout_read_fd, int stderr_read_fd,
 
     if (max_fd == -1) break;
 
-    int activity = select(max_fd + 1, &read_fds, nullptr, nullptr, nullptr);
+    // Use a 100 ms timeout so we re-check whether both pipes are still open
+    // even when the child is sleeping or produces no output.  This prevents
+    // an indefinite block when a hung process holds the write-ends open but
+    // never writes.  The watcher will eventually kill the child, causing the
+    // write-ends to close and select() to return with EOF on the next poll.
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000;  // 100 ms
+
+    int activity = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
     if (activity < 0) break;
+    if (activity == 0) continue;  // timeout — loop again to re-arm select
 
     if (stdout_open && FD_ISSET(stdout_read_fd, &read_fds)) {
-      stdout_open = ReadFromPipe(stdout_read_fd, buffer, callback, true);
+      ssize_t n = ReadFromPipe(stdout_read_fd, buffer, callback, true);
+      if (n <= 0) {
+        stdout_open = false;
+      } else {
+        total_output_bytes += static_cast<size_t>(n);
+      }
     }
     if (stderr_open && FD_ISSET(stderr_read_fd, &read_fds)) {
-      stderr_open = ReadFromPipe(stderr_read_fd, buffer, callback, false);
+      ssize_t n = ReadFromPipe(stderr_read_fd, buffer, callback, false);
+      if (n <= 0) {
+        stderr_open = false;
+      } else {
+        total_output_bytes += static_cast<size_t>(n);
+      }
+    }
+
+    // Enforce the output size cap.  We check after every successful read so
+    // the limit is applied as soon as possible without an extra syscall per
+    // byte.  When the limit is exceeded we:
+    //   1. Kill the child immediately so it cannot produce more output.
+    //   2. Stream a clear truncation notice as a stderr chunk so the caller
+    //      (and ultimately the end user) knows the output was cut short.
+    //   3. Break out of the loop; the watcher / WaitWithTimeout will reap
+    //      the child normally.
+    if (total_output_bytes >= SandboxedProcess::kMaxOutputBytes) {
+      kill(child_pid, SIGKILL);
+      const std::string notice = absl::StrFormat(
+          "\n[Output truncated: combined stdout+stderr exceeded %zu KB limit]\n",
+          SandboxedProcess::kMaxOutputBytes / 1024);
+      callback("", notice);
+      truncated = true;
+      break;
     }
   }
+
+  return truncated;
 }
 
 // Waits for child process and collects resource statistics.
@@ -453,35 +527,214 @@ void ReadProcessOutput(int stdout_read_fd, int stderr_read_fd,
           stats};
 }
 
+// Watcher process that monitors wall-clock time and kills child if timeout exceeded.
+// IMPORTANT: Must close all inherited file descriptors before sleeping so that
+// the parent's ReadProcessOutput loop sees EOF as soon as the sandboxed child
+// exits, rather than waiting for the watcher to finish its sleep.  If the
+// watcher kept the pipe write-ends open, the parent would always block for the
+// full timeout duration even for programs that finish instantly.
+void RunTimeoutWatcher(pid_t child_pid, int timeout_seconds) {
+  // Close all file descriptors inherited from the parent.  We only need the
+  // ability to send a signal, which requires no open fds.  Closing everything
+  // ensures the parent's pipe read-ends see EOF the moment the child exits,
+  // not when the watcher's sleep finishes.
+  //
+  // We iterate up to a reasonable limit (1024) rather than using
+  // sysconf(_SC_OPEN_MAX) which can return a very large value on some systems.
+  for (int fd = 0; fd < 1024; ++fd) {
+    close(fd);
+  }
+
+  // Sleep for the timeout duration.
+  sleep(timeout_seconds);
+
+  // Check if child is still running and kill it if so.
+  if (kill(child_pid, 0) == 0) {
+    kill(child_pid, SIGKILL);
+  }
+
+  _exit(0);
+}
+
+// Waits for child process with a watcher process enforcing wall-clock timeout.
+// Collects rusage for the child via wait4.
+// Returns true if the child was killed by the watcher (timeout), false if the
+// child finished on its own.
+[[nodiscard]] bool WaitWithTimeout(pid_t child_pid, pid_t watcher_pid,
+                                    int& child_status,
+                                    struct rusage& child_usage) {
+  bool timeout_occurred = false;
+
+  while (true) {
+    // Wait for any child (either the sandboxed process or the watcher).
+    // We use wait4 so we can collect rusage for the sandboxed child.
+    struct rusage usage_tmp{};
+    int status_tmp = 0;
+    pid_t finished_pid = wait4(-1, &status_tmp, 0, &usage_tmp);
+
+    if (finished_pid <= 0) {
+      // No more children or error — stop waiting.
+      break;
+    }
+
+    if (finished_pid == child_pid) {
+      // Sandboxed child finished before the timeout watcher fired.
+      child_status = status_tmp;
+      child_usage = usage_tmp;
+      // Kill the watcher to prevent it from firing after the child is gone.
+      kill(watcher_pid, SIGKILL);
+      waitpid(watcher_pid, nullptr, 0);
+      break;
+    } else if (finished_pid == watcher_pid) {
+      // Watcher exited — it sent SIGKILL to the child because the wall-clock
+      // timeout elapsed.
+      timeout_occurred = true;
+      // Collect the child's exit status and resource usage.
+      wait4(child_pid, &child_status, 0, &child_usage);
+      break;
+    }
+    // Some other unexpected child — ignore and keep waiting.
+  }
+
+  return timeout_occurred;
+}
+
 SandboxedProcess::Result SandboxedProcess::ExecuteCommandStreaming(
-    absl::Span<const std::string> argv, OutputCallback callback,
-    bool sandboxed) {
+    absl::Span<const std::string> argv, absl::string_view stdin_data,
+    OutputCallback callback, bool sandboxed) {
+  PipePair stdin_pipe;
   PipePair stdout_pipe;
   PipePair stderr_pipe;
 
-  if (!stdout_pipe.Create() || !stderr_pipe.Create()) {
-    return {false, "Failed to create pipes", {}};
+  if (!stdin_pipe.Create() || !stdout_pipe.Create() || !stderr_pipe.Create()) {
+    SandboxedProcess::Result r;
+    r.success = false;
+    r.error_message = "Failed to create pipes";
+    return r;
   }
 
   absl::Time start_time = absl::Now();
 
   pid_t pid = fork();
   if (pid == -1) {
-    return {false, "Failed to fork", {}};
+    SandboxedProcess::Result r;
+    r.success = false;
+    r.error_message = "Failed to fork";
+    return r;
   }
 
   if (pid == 0) {
-    // Child process - use raw fds since we're about to exec
-    ExecuteChildProcess(argv, stdout_pipe.WriteFd(), stderr_pipe.WriteFd(),
-                        sandboxed);
-  } else {
-    // Parent process - close write ends and read output
-    stdout_pipe.CloseWrite();
-    stderr_pipe.CloseWrite();
-
-    ReadProcessOutput(stdout_pipe.ReadFd(), stderr_pipe.ReadFd(), callback);
-    return WaitForChildProcess(pid, start_time);
+    // Child process — set up and exec.  Never returns.
+    // The child reads from the read end of the stdin pipe.
+    ExecuteChildProcess(argv, stdin_pipe.ReadFd(), stdout_pipe.WriteFd(),
+                        stderr_pipe.WriteFd(), sandboxed);
+    // ExecuteChildProcess calls _exit / exec; this line is unreachable.
   }
+
+  // ---- Parent process ----
+
+  // Close the child-side ends in the parent:
+  //   • stdin  read end  — the parent only writes to stdin.
+  //   • stdout write end — the parent only reads from stdout.
+  //   • stderr write end — the parent only reads from stderr.
+  // Closing the output write-ends here (before forking the watcher) ensures
+  // the watcher never inherits them, so EOF is seen as soon as the child exits.
+  stdin_pipe.CloseRead();
+  stdout_pipe.CloseWrite();
+  stderr_pipe.CloseWrite();
+
+  // Write all stdin data to the child and close the write end so the child
+  // receives EOF after reading all provided input.  We write the entire buffer
+  // in a loop to handle partial writes (write() may write fewer bytes than
+  // requested, especially for large inputs).
+  if (!stdin_data.empty()) {
+    const char* buf = stdin_data.data();
+    size_t remaining = stdin_data.size();
+    while (remaining > 0) {
+      ssize_t written = write(stdin_pipe.WriteFd(), buf, remaining);
+      if (written <= 0) break;  // pipe full or error; child will see EOF
+      buf += written;
+      remaining -= written;
+    }
+  }
+  // Close the write end of stdin so the child sees EOF after consuming all
+  // input.  This must happen before we start reading output, otherwise the
+  // child may block waiting for more input and we deadlock.
+  stdin_pipe.CloseWrite();
+
+  pid_t watcher_pid = -1;
+
+  // Fork a watcher process that enforces the wall-clock timeout.
+  // Only for sandboxed (untrusted) execution — compilation runs unsandboxed.
+  if (sandboxed) {
+    watcher_pid = fork();
+    if (watcher_pid == 0) {
+      // Watcher process — never returns to parent code.
+      RunTimeoutWatcher(pid, kWallClockTimeoutSeconds);
+    }
+    if (watcher_pid == -1) {
+      // Failed to fork watcher — kill the child and bail out.
+      kill(pid, SIGKILL);
+      waitpid(pid, nullptr, 0);
+      SandboxedProcess::Result r;
+      r.success = false;
+      r.error_message = "Failed to fork timeout watcher";
+      return r;
+    }
+  }
+
+  // Drain output from the child.  ReadProcessOutput uses a short select()
+  // timeout internally, so it will unblock promptly after the child is killed
+  // by the watcher (pipe write-ends close when child exits).  It also enforces
+  // the output size cap and returns true if the output was truncated.
+  bool output_truncated =
+      ReadProcessOutput(stdout_pipe.ReadFd(), stderr_pipe.ReadFd(), pid, callback);
+
+  // Wait for the child (and watcher) and collect resource usage.
+  int status = 0;
+  struct rusage usage{};
+  bool timeout_occurred = false;
+
+  if (sandboxed && watcher_pid > 0) {
+    timeout_occurred = WaitWithTimeout(pid, watcher_pid, status, usage);
+  } else {
+    // Non-sandboxed execution (e.g. compilation) — wait normally.
+    wait4(pid, &status, 0, &usage);
+  }
+
+  absl::Time end_time = absl::Now();
+  SandboxedProcess::ResourceStats stats =
+      ComputeResourceStats(usage, start_time, end_time);
+
+  if (timeout_occurred) {
+    SandboxedProcess::Result r;
+    r.success = false;
+    r.error_message = absl::StrCat("Wall-clock timeout exceeded (",
+                                   kWallClockTimeoutSeconds, " seconds)");
+    r.stats = stats;
+    r.wall_clock_timeout = true;
+    r.output_truncated = output_truncated;
+    return r;
+  }
+
+  // If the output was truncated the child was killed by us (SIGKILL), so it
+  // will have exited with a signal rather than exit code 0.  We treat this as
+  // a non-success but with a dedicated flag so callers can distinguish it from
+  // a genuine runtime error.
+  bool success = !output_truncated &&
+                 WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  SandboxedProcess::Result r;
+  r.success = success;
+  if (output_truncated) {
+    r.error_message = absl::StrFormat(
+        "Output truncated: combined stdout+stderr exceeded %zu KB limit",
+        SandboxedProcess::kMaxOutputBytes / 1024);
+  } else {
+    r.error_message = success ? "" : "Process exited with non-zero status";
+  }
+  r.stats = stats;
+  r.output_truncated = output_truncated;
+  return r;
 }
 
 }  // namespace dcodex

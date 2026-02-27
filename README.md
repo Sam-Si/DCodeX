@@ -7,6 +7,15 @@
 ## ✨ Key Features
 
 - **🛡️ Secure Sandboxing:** Leverages Linux `rlimit` to enforce strict CPU and memory constraints.
+- **⏰ Wall-Clock Timeout:** A dedicated watcher process terminates any sandboxed program that exceeds the configured
+  real-time limit (default: 5 seconds), catching programs that sleep, block on I/O, or are otherwise hung — scenarios
+  that CPU-time limits alone cannot handle.
+- **✂️ Output Size Limiting:** Enforces a hard cap (default: 10 KB) on combined stdout+stderr output. When the limit is
+  hit the child is killed immediately, a truncation notice is appended, and the `output_truncated` flag is set —
+  preventing runaway programs from flooding the system.
+- **⌨️ Stdin Support:** Pass arbitrary input data to the program's standard input via the `stdin_data` field in
+  `CodeRequest`. The cache key covers both source code and stdin, so the same program with different inputs is cached
+  independently.
 - **⚡ Real-time Streaming:** Uses gRPC bi-directional streaming for instantaneous stdout/stderr feedback.
 - **📊 Resource Monitoring:** Tracks peak memory usage and execution time with human-readable formatting.
 - **💾 Smart Caching:** FNV-1a hash-based result caching eliminates redundant executions for identical code.
@@ -163,33 +172,36 @@ The `examples/` directory contains sample programs organized by language:
 
 ### C++ Examples
 
-| File | Description | Key Concepts |
-|------|-------------|--------------|
-| `01_hello_world.cpp` | Basic Hello World program | I/O, loops |
-| `02_basic_math.cpp` | Math operations demonstration | Arithmetic, cmath functions |
-| `03_fibonacci.cpp` | Fibonacci sequence generator | Loops, algorithms |
-| `04_prime_numbers.cpp` | Prime number finder | Algorithms, math |
-| `05_factorial.cpp` | Factorial calculator | Functions, recursion alternative |
-| `06_arrays_and_vectors.cpp` | Array and vector operations | STL containers, algorithms |
-| `07_strings.cpp` | String manipulation | std::string, algorithms |
-| `08_memory_allocation.cpp` | Memory management demo | new/delete, smart pointers, vectors |
-| `09_cpu_intensive.cpp` | CPU-intensive computation | Heavy calculations, chrono |
-| `10_sandbox_safe.cpp` | Sandbox-safe program | Resource-conscious coding |
-| `11_infinite_loop.cpp` | Infinite loop example | Timeout demonstration |
-| `12_memory_exhaustion.cpp` | Memory exhaustion test | Resource limit demo |
+| File                        | Description                   | Key Concepts                        |
+|-----------------------------|-------------------------------|-------------------------------------|
+| `01_hello_world.cpp`        | Basic Hello World program     | I/O, loops                          |
+| `02_basic_math.cpp`         | Math operations demonstration | Arithmetic, cmath functions         |
+| `03_fibonacci.cpp`          | Fibonacci sequence generator  | Loops, algorithms                   |
+| `04_prime_numbers.cpp`      | Prime number finder           | Algorithms, math                    |
+| `05_factorial.cpp`          | Factorial calculator          | Functions, recursion alternative    |
+| `06_arrays_and_vectors.cpp` | Array and vector operations   | STL containers, algorithms          |
+| `07_strings.cpp`            | String manipulation           | std::string, algorithms             |
+| `08_memory_allocation.cpp`  | Memory management demo        | new/delete, smart pointers, vectors |
+| `09_cpu_intensive.cpp`      | CPU-intensive computation     | Heavy calculations, chrono          |
+| `10_sandbox_safe.cpp`       | Sandbox-safe program          | Resource-conscious coding           |
+| `11_infinite_loop.cpp`      | Infinite loop example         | Timeout demonstration               |
+| `12_memory_exhaustion.cpp`  | Memory exhaustion test        | Resource limit demo                 |
+| `13_stdin_input.cpp`        | Stdin input demo              | std::cin, std::getline, statistics  |
+| `14_output_flood.cpp`       | Output size limit demo        | while(true), output truncation      |
 
 ### Python Examples
 
-| File | Description | Key Concepts |
-|------|-------------|--------------|
-| `01_hello_world.py` | Basic Hello World | Print, system info, datetime |
-| `02_basic_math.py` | Math operations | math, random, statistics |
-| `03_file_operations.py` | File I/O demo | pathlib, json, tempfile |
-| `04_data_structures.py` | Data structures | lists, dicts, sets, collections |
-| `05_iterators_generators.py` | Iterators & generators | yield, itertools |
-| `06_infinite_loop.py` | Infinite loop example | Timeout demonstration |
-| `07_memory_exhaustion.py` | Memory exhaustion test | Resource limit demo |
-| `08_slow_computation.py` | Slow computation | CPU time limit demo |
+| File                         | Description            | Key Concepts                              |
+|------------------------------|------------------------|-------------------------------------------|
+| `01_hello_world.py`          | Basic Hello World      | Print, system info, datetime              |
+| `02_basic_math.py`           | Math operations        | math, random, statistics                  |
+| `03_file_operations.py`      | File I/O demo          | pathlib, json, tempfile                   |
+| `04_data_structures.py`      | Data structures        | lists, dicts, sets, collections           |
+| `05_iterators_generators.py` | Iterators & generators | yield, itertools                          |
+| `06_infinite_loop.py`        | Infinite loop example  | Timeout demonstration                     |
+| `07_memory_exhaustion.py`    | Memory exhaustion test | Resource limit demo                       |
+| `08_slow_computation.py`     | Slow computation       | CPU time limit demo                       |
+| `09_output_flood.py`         | Output size limit demo | while True, flush=True, output truncation |
 
 ### Running Examples
 
@@ -206,6 +218,14 @@ python python_client/client.py --file examples/cpp/01_hello_world.cpp
 # Run Python examples directly
 cd examples/python
 python 01_hello_world.py
+
+# Demonstrate the 10 KB output size limit (C++)
+# Expected: ~20 lines of output then truncation notice + ✂️ OUTPUT TRUNCATED flag
+python python_client/client.py --file examples/cpp/14_output_flood.cpp
+
+# Demonstrate the 10 KB output size limit (Python)
+# Expected: same behaviour — sandbox kills the process and flags output_truncated
+python python_client/client.py --file examples/python/09_output_flood.py
 ```
 
 ---
@@ -242,6 +262,212 @@ Computation complete! Result: 6.66667e+08
    🌐 Network Time: 245.32 ms
    ⚡ CACHE HIT
 ==================================================
+```
+
+---
+
+## ⏰ Wall-Clock Timeout
+
+DCodeX enforces a **wall-clock (real-time) timeout** on every sandboxed execution in addition to the CPU-time limit
+provided by `RLIMIT_CPU`.
+
+### Why Wall-Clock Timeout?
+
+CPU-time limits (`RLIMIT_CPU`) only count time the process spends on the CPU. A program that calls `sleep()`, blocks on
+I/O, or is otherwise hung consumes very little CPU time and will **never** be killed by `RLIMIT_CPU` alone. Wall-clock
+timeout measures actual elapsed real time, so it catches:
+
+- Programs with `sleep()` / `usleep()` / `std::this_thread::sleep_for()` calls
+- Programs blocked waiting for I/O that never arrives
+- Programs that are genuinely hung (e.g. deadlocked)
+- Any other scenario where the process is not making progress
+
+### How It Works
+
+1. After forking the sandboxed child process, the parent forks a second **watcher process**.
+2. The watcher sleeps for `kWallClockTimeoutSeconds` (default: **5 seconds**) using `sleep()`.
+3. If the child is still running after the timeout, the watcher sends `SIGKILL` to the child and exits.
+4. The parent's output-draining loop uses a short `select()` timeout (100 ms) so it unblocks promptly once the child's
+   pipes are closed (which happens as soon as the child is killed).
+5. The parent reaps both processes with `wait4()` to collect accurate resource usage.
+6. A `wall_clock_timeout = true` flag is set in the result and propagated to the gRPC client.
+
+### Configuration
+
+The timeout is controlled by the constant `kWallClockTimeoutSeconds` in `src/server/sandbox.cpp`:
+
+```cpp
+// Wall-clock timeout in seconds for sandboxed execution.
+constexpr int kWallClockTimeoutSeconds = 5;
+```
+
+### Client Output
+
+When a wall-clock timeout occurs the Python client shows:
+
+```
+STDERR: Wall-clock timeout exceeded (5 seconds)
+--------------------------------------------------
+📊 Resource Usage Summary:
+   💾 Peak Memory: 1.23 MB
+   ⏱️  Execution Time: 5001 ms
+   🌐 Network Time: 5023 ms
+   🆕 Fresh Execution
+   ⏰ WALL-CLOCK TIMEOUT (process killed by sandbox)
+==================================================
+```
+
+---
+
+## ✂️ Output Size Limiting
+
+DCodeX enforces a **hard cap on the total output** (stdout + stderr combined) produced by every sandboxed execution.
+
+### Why Output Limiting?
+
+A program with no output limit can flood the server and the client with arbitrarily large amounts of data. Classic
+examples:
+
+- `while (true) { std::cout << <long essay pasted from the internet>; }` — fills the pipe buffer in milliseconds and
+  keeps going until the wall-clock timeout fires, potentially buffering gigabytes in memory.
+- A program that opens `/dev/urandom` and copies it to stdout.
+- A bug that accidentally prints a multi-million-element container.
+
+Without a limit, the server must buffer all output before streaming it, the client must receive all of it, and the
+execution cache would store it permanently. The output cap stops this as soon as the threshold is crossed, regardless of
+whether the wall-clock timeout has fired yet.
+
+### How It Works
+
+1. `ReadProcessOutput` in `sandbox.cpp` maintains a running counter of bytes received across **both** stdout and stderr.
+2. After every `read()` call the counter is checked against `kMaxOutputBytes`.
+3. When the limit is exceeded the server:
+    - Sends `SIGKILL` to the child process immediately.
+    - Appends a human-readable notice to the stderr stream:
+      ```
+      [Output truncated: combined stdout+stderr exceeded 10 KB limit]
+      ```
+    - Breaks out of the output-draining loop.
+4. The child is reaped normally by `WaitWithTimeout` / `wait4`.
+5. `result.output_truncated = true` is set and propagated through the gRPC `ExecutionLog` as `output_truncated = 7`.
+
+### Configuration
+
+The limit is controlled by the constant `kMaxOutputBytes` in `src/server/sandbox.h`:
+
+```cpp
+// Maximum combined stdout+stderr output in bytes before the process is
+// killed and the output is truncated.  10 KB is small enough for demos
+// while still protecting against runaway printers.
+static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
+```
+
+### Client Output
+
+When output is truncated the Python client shows the truncation notice inline (streamed as a stderr chunk) and a summary
+flag:
+
+```
+...first 10 KB of output...
+STDERR: 
+[Output truncated: combined stdout+stderr exceeded 10 KB limit]
+--------------------------------------------------
+📊 Resource Usage Summary:
+   💾 Peak Memory: 4.00 MB
+   ⏱️  Execution Time: 312.00 ms
+   🌐 Network Time: 318.45 ms
+   🆕 Fresh Execution
+   ✂️  OUTPUT TRUNCATED (exceeded 10 KB combined output limit)
+==================================================
+```
+
+### Proto Field
+
+```protobuf
+message ExecutionLog {
+  // ...
+  bool output_truncated = 7;  // true when output exceeded kMaxOutputBytes
+}
+```
+
+---
+
+## ⌨️ Stdin Support
+
+DCodeX allows you to supply arbitrary data to a program's **standard input** (stdin) as part of every execution request.
+
+### How It Works
+
+The `stdin_data` field in `CodeRequest` (proto field 3) is piped directly into the sandboxed process's `STDIN_FILENO`
+before execution begins. After all bytes are written the write-end of the pipe is closed, so the program receives a
+clean EOF when it has consumed all input — exactly as if a user had typed the data and pressed Ctrl-D.
+
+The cache key is derived from **both the source code and the stdin data** (concatenated with a separator before
+hashing), so the same program submitted with different stdin values is stored and retrieved independently.
+
+### Python Client Usage
+
+Pass stdin inline using `--stdin` (use `\n` for newlines):
+
+```bash
+# Run the stdin example with inline data
+python python_client/client.py \
+    --file examples/cpp/13_stdin_input.cpp \
+    --stdin 'DCodeX\n5\n10\n20\n30\n40\n50\n'
+```
+
+Pass stdin from a file using `--stdin-file` (takes precedence over `--stdin`):
+
+```bash
+# Create an input file
+cat > /tmp/my_input.txt << 'EOF'
+DCodeX
+5
+10
+20
+30
+40
+50
+EOF
+
+python python_client/client.py \
+    --file examples/cpp/13_stdin_input.cpp \
+    --stdin-file /tmp/my_input.txt
+```
+
+### Expected Output for `13_stdin_input.cpp`
+
+```
+Hello, DCodeX!
+=========================
+You provided 5 number(s):
+  [1] 10
+  [2] 20
+  [3] 30
+  [4] 40
+  [5] 50
+
+Statistics:
+  Sum     : 150
+  Minimum : 10
+  Maximum : 50
+  Average : 30
+```
+
+### Programmatic Usage (Python)
+
+```python
+result = execute_code(stub, code, stdin_data="Alice\n3\n7\n14\n21\n")
+```
+
+### Proto Field
+
+```protobuf
+message CodeRequest {
+  string language   = 1;
+  string code       = 2;
+  string stdin_data = 3;  // optional; empty = EOF immediately
+}
 ```
 
 ---
