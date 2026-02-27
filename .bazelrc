@@ -1,16 +1,13 @@
 # ============================================================
-# 1. DYNAMIC GLOBAL CACHE (The Fix)
+# 1. DYNAMIC GLOBAL CACHE
 # ============================================================
-# If on macOS, use a user-writable global path.
-# If in Docker, use the root-level path.
 startup --output_base=/tmp/bazel-global-cache
 
 # ============================================================
 # 2. STARTUP: JVM & MEMORY (M1 Max Tuned)
 # ============================================================
 startup --max_idle_secs=10800
-# High-performance M1 Max JVM settings
-startup --host_jvm_args=-Xmx24g
+startup --host_jvm_args=-Xmx16g
 startup --host_jvm_args=-XX:+UseG1GC
 startup --host_jvm_args=-XX:MaxGCPauseMillis=20
 
@@ -21,8 +18,6 @@ common --announce_rc
 common --color=yes
 common --watchfs
 common --incompatible_strict_action_env
-
-# Shared Repository Cache (Where external downloads go)
 common --repository_cache=/tmp/bazel-repo-cache
 
 # ============================================================
@@ -34,10 +29,10 @@ build --copt=-g0
 build --strip=always
 build --features=-dsym_selection
 
-# General Parallelism (Safe default for M1 Max)
+# Resource limits (Individual lines for syntax)
+build --local_resources=cpu=8
+build --local_resources=memory=24576
 build --jobs=8
-build --local_cpu_resources=8
-build --local_ram_resources=24576
 
 # I/O Speedups
 build --nolegacy_external_runfiles
@@ -45,16 +40,28 @@ build --nobuild_runfile_links
 build --reuse_sandbox_directories
 
 # ============================================================
-# 5. DOCKER CONFIG (--config=docker)
+# 5. DOCKER CONFIG (--config=docker) - ULTRA PERFORMANCE
 # ============================================================
-# Tuned for Rancher Desktop (9 CPUs / 48GB RAM)
+# Matches your Rancher allocation (9 CPUs)
 build:docker --jobs=9
-build:docker --local_cpu_resources=9
-build:docker --strategy=CppCompile=worker
-build:docker --strategy=Javac=worker
-build:docker --worker_max_instances=9
+build:docker --local_resources=cpu=9
+build:docker --local_resources=memory=32768
+
+# The "Secret Sauce" for Docker-on-Mac Speed:
+# 1. Disable Sandboxing (Docker is already an isolated environment)
 build:docker --spawn_strategy=local
+build:docker --strategy=CppCompile=local
+build:docker --strategy=Javac=worker
+build:docker --genrule_strategy=local
+
+# 2. Caching & Persistence
 build:docker --disk_cache=/tmp/bazel-disk-cache
+build:docker --worker_max_instances=4
+
+# 3. Reduce I/O operations (fewer symlinks, fewer writes)
+build:docker --nobuild_runfile_links
+build:docker --linkopt=-S
+build:docker --experimental_strict_action_env
 
 # ============================================================
 # 6. MACOS NATIVE CONFIG (--config=macos)
@@ -62,7 +69,6 @@ build:docker --disk_cache=/tmp/bazel-disk-cache
 build:macos --jobs=10
 build:macos --cpu=darwin_arm64
 build:macos --macos_cpus=arm64
-# Linker options (lld not available, using default)
 build:macos --apple_generate_dsym=false
 build:macos --disk_cache=~/Library/Caches/bazel-disk-cache
 build:macos --copt=-faligned-allocation
