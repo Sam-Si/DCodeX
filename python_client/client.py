@@ -658,7 +658,7 @@ def run_all_examples(stub: CodeExecutorStub) -> None:
     print("Features demonstrated:")
     print("  📊 Peak memory tracking")
     print("  ⏱️  Execution time measurement")
-    print("  💾 Result caching with FNV-1a hashing")
+    print("  💾 Result caching with absl::Hash")
     print("  ⚡ Cache hit/miss detection")
     print("  🛡️  Sandboxed execution")
     print("=" * 60)

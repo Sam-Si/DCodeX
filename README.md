@@ -18,7 +18,7 @@
   independently.
 - **⚡ Real-time Streaming:** Uses gRPC bi-directional streaming for instantaneous stdout/stderr feedback.
 - **📊 Resource Monitoring:** Tracks peak memory usage and execution time with human-readable formatting.
-- **💾 Smart Caching:** FNV-1a hash-based result caching eliminates redundant executions for identical code.
+- **💾 Smart Caching:** `absl::Hash`-based result caching eliminates redundant executions for identical code.
 - **🛠️ Bazel-Powered:** Reproducible, hermetic builds ensuring consistency across environments.
 - **🐍 Python Client:** Easy-to-use client with full type hints and flexible execution modes.
 - **📈 Scalable:** Designed with a reactive, multi-threaded architecture to handle concurrent execution requests.
@@ -90,9 +90,9 @@ python python_client/client.py --directory /path/to/cpp/files
 Execute all `.cpp` files from a specified directory.
 
 ```bash
-python python_client/client.py --directory /path/to/python/files --language python
+python python_client/client.py --directory /path/to/python/files
 ```
-Execute all `.py` files from a specified directory.
+Execute all `.py` files from a specified directory (language auto-detected by directory name).
 
 #### Execute a Specific File
 ```bash
@@ -134,9 +134,8 @@ python python_client/client.py --server localhost:50051
 |--------|-------|-------------|---------|
 | `--server` | | Server address | `localhost:50051` |
 | `--interactive` | `-i` | Run in interactive mode | `False` |
-| `--directory` | `-d` | Directory containing code files (use `--language` to pick `.cpp` or `.py`) | `examples/cpp` |
+| `--directory` | `-d` | Directory containing code files | `examples/cpp` |
 | `--file` | `-f` | Specific code file to execute | None |
-| `--language` | `-l` | Override language detection for `--file`/`--directory` (`cpp` or `python`) | Auto-detect by extension for `--file`, required for `--directory` with Python |
 | `--cache-demo` | `-c` | Run files twice to show caching | `False` |
 
 ### Examples
@@ -149,7 +148,7 @@ python python_client/client.py --cache-demo
 python python_client/client.py --directory ./my_cpp_programs
 
 # Execute all Python files from a directory
-python python_client/client.py --directory ./my_python_programs --language python
+python python_client/client.py --directory ./my_python_programs
 
 # Execute a single file
 python python_client/client.py --file ./test.cpp
@@ -236,7 +235,7 @@ python python_client/client.py --file examples/cpp/01_hello_world.cpp
 python python_client/client.py --file examples/python/01_hello_world.py
 
 # Run all Python examples via the server
-python python_client/client.py --directory examples/python --language python
+python python_client/client.py --directory examples/python
 
 # Demonstrate the 10 KB output size limit (C++)
 # Expected: ~20 lines of output then truncation notice + ✂️ OUTPUT TRUNCATED flag
@@ -497,7 +496,7 @@ DCodeX implements intelligent result caching to avoid redundant code executions:
 
 ### How It Works
 
-1. **FNV-1a Hashing:** Each code submission is hashed using FNV-1a algorithm
+1. **absl::Hash Hashing:** Each code submission is hashed using `absl::Hash`
 2. **Cache Lookup:** If the hash exists in cache, the stored result is returned immediately
 3. **Cache Miss:** New code is executed, and successful results are stored for future use
 
@@ -513,7 +512,7 @@ DCodeX implements intelligent result caching to avoid redundant code executions:
 Default settings in `execution_cache.h`:
 - **Max Entries:** 1000
 - **TTL:** 1 hour
-- **Hash Algorithm:** FNV-1a (64-bit)
+- **Hash Algorithm:** `absl::Hash` (64-bit)
 
 ### Cache Indicators
 

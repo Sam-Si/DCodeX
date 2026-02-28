@@ -53,7 +53,7 @@ class ExecutionCache {
   // Stores result in cache.
   void Put(absl::string_view code_hash, const CachedResult& result);
 
-  // Computes hash of code using FNV-1a algorithm.
+  // Computes hash of code using absl::Hash.
   // Returns error status if hash computation fails.
   static absl::StatusOr<std::string> ComputeHash(absl::string_view code);
 

@@ -22,6 +22,7 @@
 #include <sstream>
 
 #include "absl/log/log.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/time/clock.h"
@@ -248,19 +249,24 @@ ExecutionResult PythonExecutionStrategy::Execute(absl::string_view code,
   return HandleExecutionResult("Run", run_res, trace);
 }
 
+// --- ExecutionStrategy Factory ---
+std::unique_ptr<ExecutionStrategy> ExecutionStrategy::Create(
+    absl::string_view filename_or_extension) {
+  if (absl::EndsWith(filename_or_extension, ".py") ||
+      filename_or_extension == "python") {
+    return std::make_unique<PythonExecutionStrategy>();
+  }
+  return std::make_unique<CppExecutionStrategy>();
+}
+
 // --- SandboxedProcess Implementation ---
 ExecutionCache& SandboxedProcess::GetCache() { return CacheHolder::Get(); }
 void SandboxedProcess::ClearCache() { CacheHolder::Get().Clear(); }
 
 ExecutionResult SandboxedProcess::CompileAndRunStreaming(
-    absl::string_view language, absl::string_view code,
+    absl::string_view filename_or_extension, absl::string_view code,
     absl::string_view stdin_data, OutputCallback callback) {
-  std::unique_ptr<ExecutionStrategy> strategy;
-  if (language == "python") {
-    strategy = std::make_unique<PythonExecutionStrategy>();
-  } else {
-    strategy = std::make_unique<CppExecutionStrategy>();
-  }
+  auto strategy = ExecutionStrategy::Create(filename_or_extension);
 
   std::string cache_input = absl::StrCat(strategy->GetStrategyId(), ":", code,
                                         "\0", stdin_data);

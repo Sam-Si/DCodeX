@@ -15,29 +15,16 @@
 #include "src/server/execution_cache.h"
 
 #include "absl/algorithm/container.h"
+#include "absl/hash/hash.h"
 #include "absl/strings/str_format.h"
 
 namespace dcodex {
 
 namespace {
 
-// FNV-1a hash constants.
-constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
-constexpr uint64_t kFnvPrime = 1099511628211ULL;
-
-// Converts 64-bit hash to hex string.
-std::string HashToHex(uint64_t hash) {
+// Converts hash to hex string.
+std::string HashToHex(size_t hash) {
   return absl::StrFormat("%016x", hash);
-}
-
-// Simple FNV-1a hash function - fast and good distribution.
-uint64_t Fnv1aHash(absl::string_view data) {
-  uint64_t hash = kFnvOffsetBasis;
-  for (unsigned char c : data) {
-    hash ^= static_cast<uint64_t>(c);
-    hash *= kFnvPrime;
-  }
-  return hash;
 }
 
 }  // namespace
@@ -97,7 +84,7 @@ absl::StatusOr<std::string> ExecutionCache::ComputeHash(
   if (code.empty()) {
     return absl::InvalidArgumentError("Code cannot be empty");
   }
-  uint64_t hash = Fnv1aHash(code);
+  size_t hash = absl::Hash<absl::string_view>{}(code);
   return HashToHex(hash);
 }
 

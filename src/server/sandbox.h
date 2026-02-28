@@ -75,8 +75,11 @@ class ExecutionStrategy {
 
   // Returns a unique identifier for this strategy (used for caching).
   virtual absl::string_view GetStrategyId() const = 0;
-};
 
+  // Factory method to create an execution strategy based on file extension or language.
+  static std::unique_ptr<ExecutionStrategy> Create(
+      absl::string_view filename_or_extension);
+};
 // C++ implementation of the ExecutionStrategy.
 class CppExecutionStrategy : public ExecutionStrategy {
  public:
@@ -114,7 +117,7 @@ class SandboxedProcess {
  public:
   // Compiles and runs code with caching support.
   [[nodiscard]] static ExecutionResult CompileAndRunStreaming(
-      absl::string_view language, absl::string_view code,
+      absl::string_view filename_or_extension, absl::string_view code,
       absl::string_view stdin_data, OutputCallback callback);
 
   // Accesses the global execution cache.
@@ -122,12 +125,6 @@ class SandboxedProcess {
 
   // Clears the execution cache.
   static void ClearCache();
-
- private:
-  // Internal execution without caching.
-  [[nodiscard]] static ExecutionResult ExecuteWithStrategy(
-      ExecutionStrategy& strategy, absl::string_view code,
-      absl::string_view stdin_data, OutputCallback callback);
 };
 
 }  // namespace dcodex
