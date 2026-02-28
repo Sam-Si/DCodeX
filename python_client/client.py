@@ -157,10 +157,18 @@ def print_results(results: ExecutionResult, show_output: bool = True) -> None:
         results: ExecutionResult to print.
         show_output: Whether to show stdout/stderr output.
     """
-    if show_output and results.stdout:
-        print(results.stdout, end='')
-    if show_output and results.stderr:
-        print(f"STDERR: {results.stderr}", end='')
+    if show_output:
+        if results.stdout:
+            print(results.stdout, end='')
+        if results.stderr:
+            # If stdout existed and didn't end with a newline, add one before STDERR
+            if results.stdout and not results.stdout.endswith('\n'):
+                print()
+            print(f"STDERR: {results.stderr}", end='')
+
+        if not results.stdout and not results.stderr and results.execution_time > 0:
+            # Execution finished but produced no output - might be a silent crash or infrastructure error
+            pass
     
     print("-" * 50)
     print("📊 Resource Usage Summary:")

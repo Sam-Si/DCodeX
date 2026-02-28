@@ -122,14 +122,14 @@ ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
 
   // Compile
   auto null_cb = [](absl::string_view, absl::string_view) {};
-  ExecutionResult comp_res = run_cmd({"g++", "-std=c++17", source_file, "-o", binary_path}, "", false, null_cb);
+  ExecutionResult comp_res = run_cmd({"clang++", "-std=c++17", source_file, "-o", binary_path}, "", false, null_cb);
   if (!comp_res.success) {
-    // If compilation fails, we might want to see the errors, so we run it again with the real callback
-    // or we could have just passed the real callback to begin with.
-    // Given the user's request to fix the Rosetta error appearing in ALL examples,
-    // and since compilation also runs via run_cmd, let's make sure run_cmd itself
-    // handles the callback correctly.
-    return run_cmd({"g++", "-std=c++17", source_file, "-o", binary_path}, "", false, callback);
+    // If compilation fails, we run it again with the real callback to capture output
+    ExecutionResult err_res = run_cmd({"clang++", "-std=c++17", source_file, "-o", binary_path}, "", false, callback);
+    if (err_res.error_message.empty()) {
+      err_res.error_message = "Compilation failed";
+    }
+    return err_res;
   }
 
   // Run

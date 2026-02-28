@@ -195,12 +195,12 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
     state_.SetWallClockTimeout(result.wall_clock_timeout);
     state_.SetOutputTruncated(result.output_truncated);
     state_.MarkFinished();
-    // If the process was killed by the wall-clock timeout, stream a stderr
-    // chunk so the client sees a clear human-readable message.
-    if (result.wall_clock_timeout) {
-      ExecutionLog timeout_log;
-      timeout_log.set_stderr_chunk(result.error_message + "\n");
-      state_.QueueLog(timeout_log);
+    // If the process failed, stream a stderr chunk so the client sees a
+    // clear human-readable message.
+    if (!result.success && !result.error_message.empty()) {
+      ExecutionLog error_log;
+      error_log.set_stderr_chunk("ERROR: " + result.error_message + "\n");
+      state_.QueueLog(error_log);
     }
     MaybeWriteNext();
   }

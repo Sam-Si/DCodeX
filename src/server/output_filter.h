@@ -28,12 +28,7 @@ class OutputFilterStrategy {
 class DefaultOutputFilterStrategy final : public OutputFilterStrategy {
  public:
   bool ShouldSuppress(absl::string_view chunk) const override {
-    if (chunk.find("rosetta error:") != absl::string_view::npos) {
-      return true;
-    }
-    if (chunk.find("mmap_anonymous_rw mmap failed") != absl::string_view::npos) {
-      return true;
-    }
+    // Disabled filtering for debugging to see all Rosetta output.
     return false;
   }
 };

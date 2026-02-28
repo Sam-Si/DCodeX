@@ -92,7 +92,7 @@ class CppExecutionStrategy : public ExecutionStrategy {
 struct SandboxLimits {
   static constexpr int kCpuTimeLimitSeconds = 1;
   static constexpr int kWallClockTimeoutSeconds = 2;
-  static constexpr size_t kMemoryLimitBytes = 500 * 1024 * 1024;
+  static constexpr size_t kMemoryLimitBytes = 1024 * 1024 * 1024;
   static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
 };
 
