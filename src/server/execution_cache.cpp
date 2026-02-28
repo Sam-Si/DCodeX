@@ -14,30 +14,18 @@
 
 #include "src/server/execution_cache.h"
 
-#include "absl/algorithm/container.h"
+#include <list>
+
+#include "absl/hash/hash.h"
 #include "absl/strings/str_format.h"
 
 namespace dcodex {
 
 namespace {
 
-// FNV-1a hash constants.
-constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
-constexpr uint64_t kFnvPrime = 1099511628211ULL;
-
-// Converts 64-bit hash to hex string.
-std::string HashToHex(uint64_t hash) {
+// Converts hash to hex string.
+std::string HashToHex(size_t hash) {
   return absl::StrFormat("%016x", hash);
-}
-
-// Simple FNV-1a hash function - fast and good distribution.
-uint64_t Fnv1aHash(absl::string_view data) {
-  uint64_t hash = kFnvOffsetBasis;
-  for (unsigned char c : data) {
-    hash ^= static_cast<uint64_t>(c);
-    hash *= kFnvPrime;
-  }
-  return hash;
 }
 
 }  // namespace
@@ -54,42 +42,39 @@ std::shared_ptr<const CachedResult> ExecutionCache::Get(
     return nullptr;
   }
 
-  // Checks if expired.
-  if (IsExpired(*it->second)) {
+  // Check if expired.
+  if (IsExpired(*it->second.result)) {
     return nullptr;
   }
 
-  // Updates access order for LRU (promote to front).
-  auto order_it = absl::c_find(access_order_, code_hash);
-  if (order_it != access_order_.end()) {
-    access_order_.erase(order_it);
-  }
-  access_order_.push_back(std::string(code_hash));
+  // Promote to front of LRU list (most recently used) using splice for O(1).
+  lru_list_.splice(lru_list_.begin(), lru_list_, it->second.lru_iterator);
 
-  return it->second;
+  return it->second.result;
 }
 
 void ExecutionCache::Put(absl::string_view code_hash,
                          const CachedResult& result) {
   absl::MutexLock lock(&mutex_);
 
-  // Removes old entry if exists (to update access order).
+  // Remove old entry if exists.
   auto it = cache_.find(code_hash);
   if (it != cache_.end()) {
-    auto order_it = absl::c_find(access_order_, code_hash);
-    if (order_it != access_order_.end()) {
-      access_order_.erase(order_it);
-    }
+    lru_list_.erase(it->second.lru_iterator);
+    cache_.erase(it);
   }
 
-  // Evicts if needed before inserting.
+  // Evict if needed before inserting.
   EvictIfNeeded();
 
-  // Inserts new entry.
+  // Insert new entry at the front of the LRU list.
+  lru_list_.push_front(std::string(code_hash));
+
   auto cached = std::make_shared<CachedResult>(result);
   cached->timestamp = absl::Now();
-  cache_[std::string(code_hash)] = cached;
-  access_order_.push_back(std::string(code_hash));
+
+  cache_.emplace(std::string(code_hash),
+                 CacheEntry{cached, lru_list_.begin()});
 }
 
 absl::StatusOr<std::string> ExecutionCache::ComputeHash(
@@ -97,7 +82,7 @@ absl::StatusOr<std::string> ExecutionCache::ComputeHash(
   if (code.empty()) {
     return absl::InvalidArgumentError("Code cannot be empty");
   }
-  uint64_t hash = Fnv1aHash(code);
+  size_t hash = absl::Hash<absl::string_view>{}(code);
   return HashToHex(hash);
 }
 
@@ -105,19 +90,20 @@ void ExecutionCache::CleanupExpired() {
   absl::MutexLock lock(&mutex_);
 
   auto now = absl::Now();
-  absl::InlinedVector<std::string, 16> to_remove;
+  // Collect keys to remove.
+  std::list<std::string> to_remove;
 
-  for (const auto& [hash, result] : cache_) {
-    if (now - result->timestamp > ttl_) {
+  for (const auto& [hash, entry] : cache_) {
+    if (now - entry.result->timestamp > ttl_) {
       to_remove.push_back(hash);
     }
   }
 
   for (const auto& hash : to_remove) {
-    cache_.erase(hash);
-    auto order_it = absl::c_find(access_order_, hash);
-    if (order_it != access_order_.end()) {
-      access_order_.erase(order_it);
+    auto it = cache_.find(hash);
+    if (it != cache_.end()) {
+      lru_list_.erase(it->second.lru_iterator);
+      cache_.erase(it);
     }
   }
 }
@@ -125,7 +111,7 @@ void ExecutionCache::CleanupExpired() {
 void ExecutionCache::Clear() {
   absl::MutexLock lock(&mutex_);
   cache_.clear();
-  access_order_.clear();
+  lru_list_.clear();
 }
 
 size_t ExecutionCache::Size() const {
@@ -134,10 +120,11 @@ size_t ExecutionCache::Size() const {
 }
 
 void ExecutionCache::EvictIfNeeded() {
-  while (cache_.size() >= max_entries_ && !access_order_.empty()) {
-    const std::string& oldest = access_order_.front();
-    cache_.erase(oldest);
-    access_order_.erase(access_order_.begin());
+  while (cache_.size() >= max_entries_ && !lru_list_.empty()) {
+    // Evict from back (least recently used).
+    const std::string& oldest_key = lru_list_.back();
+    cache_.erase(oldest_key);
+    lru_list_.pop_back();
   }
 }
 

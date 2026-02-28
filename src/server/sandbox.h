@@ -20,11 +20,18 @@
 #include <string>
 #include <vector>
 
+#include "absl/flags/declare.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "src/server/execution_cache.h"
+
+// Abseil Flags for sandboxed resource limits (must be in global namespace).
+ABSL_DECLARE_FLAG(int, sandbox_cpu_time_limit_seconds);
+ABSL_DECLARE_FLAG(int, sandbox_wall_clock_timeout_seconds);
+ABSL_DECLARE_FLAG(uint64_t, sandbox_memory_limit_bytes);
+ABSL_DECLARE_FLAG(uint64_t, sandbox_max_output_bytes);
 
 namespace dcodex {
 
@@ -75,8 +82,11 @@ class ExecutionStrategy {
 
   // Returns a unique identifier for this strategy (used for caching).
   virtual absl::string_view GetStrategyId() const = 0;
-};
 
+  // Factory method to create an execution strategy based on file extension or language.
+  static std::unique_ptr<ExecutionStrategy> Create(
+      absl::string_view filename_or_extension);
+};
 // C++ implementation of the ExecutionStrategy.
 class CppExecutionStrategy : public ExecutionStrategy {
  public:
@@ -101,20 +111,12 @@ class PythonExecutionStrategy : public ExecutionStrategy {
   absl::string_view GetStrategyId() const override { return "python"; }
 };
 
-// Centralized configuration for sandboxed resource limits.
-struct SandboxLimits {
-  static constexpr int kCpuTimeLimitSeconds = 1;
-  static constexpr int kWallClockTimeoutSeconds = 2;
-  static constexpr size_t kMemoryLimitBytes = 4ULL * 1024 * 1024 * 1024;
-  static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
-};
-
 // Orchestrator class that manages sandboxed execution and caching.
 class SandboxedProcess {
  public:
   // Compiles and runs code with caching support.
   [[nodiscard]] static ExecutionResult CompileAndRunStreaming(
-      absl::string_view language, absl::string_view code,
+      absl::string_view filename_or_extension, absl::string_view code,
       absl::string_view stdin_data, OutputCallback callback);
 
   // Accesses the global execution cache.
@@ -122,12 +124,6 @@ class SandboxedProcess {
 
   // Clears the execution cache.
   static void ClearCache();
-
- private:
-  // Internal execution without caching.
-  [[nodiscard]] static ExecutionResult ExecuteWithStrategy(
-      ExecutionStrategy& strategy, absl::string_view code,
-      absl::string_view stdin_data, OutputCallback callback);
 };
 
 }  // namespace dcodex

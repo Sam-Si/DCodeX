@@ -1,6 +1,6 @@
 // Standard C++ Memory Exhaustion Example
 // This program tries to allocate more memory than the sandbox allows.
-// The sandbox has a 500 MB memory limit (see SandboxLimits in src/server/sandbox.h).
+// The sandbox has a configurable memory limit (see --sandbox_memory_limit_bytes).
 
 #include <chrono>
 #include <iostream>

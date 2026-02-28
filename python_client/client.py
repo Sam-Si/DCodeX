@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""DCodeX Python Client - Execute C++ code with resource monitoring and caching."""
+"""DCodeX Python Client - Execute C++ code with resource monitoring and caching.
+
+This module provides a gRPC client for executing C++ and Python code on a
+DCodeX server with features like resource monitoring, smart caching, and
+sandboxed execution.
+"""
 
 # Copyright 2024 DCodeX Team
 #
@@ -22,35 +27,77 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List
+from typing import TYPE_CHECKING, Final
 
 import grpc
-
-# ANSI Color Codes
-COLOR_RESET = "\033[0m"
-COLOR_BOLD = "\033[1m"
-COLOR_RED = "\033[91m"
-COLOR_GREEN = "\033[92m"
-COLOR_YELLOW = "\033[93m"
-COLOR_BLUE = "\033[94m"
-COLOR_MAGENTA = "\033[95m"
-COLOR_CYAN = "\033[96m"
-COLOR_WHITE = "\033[97m"
 
 # Add the current directory to sys.path to find generated modules
 sys.path.append(os.path.join(os.path.dirname(__file__), "."))
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-if TYPE_CHECKING:
-    pass
-
 import proto.sandbox_pb2 as sandbox_pb2
 import proto.sandbox_pb2_grpc as sandbox_pb2_grpc
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from typing import Any
+
+
+# ==============================================================================
+# Type Aliases
+# ==============================================================================
+
+CodeExecutorStub = sandbox_pb2_grpc.CodeExecutorStub
+"""Type alias for the gRPC CodeExecutor stub."""
+
+
+# ==============================================================================
+# ANSI Color Codes
+# ==============================================================================
+
+COLOR_RESET: Final[str] = "\033[0m"
+COLOR_BOLD: Final[str] = "\033[1m"
+COLOR_RED: Final[str] = "\033[91m"
+COLOR_GREEN: Final[str] = "\033[92m"
+COLOR_YELLOW: Final[str] = "\033[93m"
+COLOR_BLUE: Final[str] = "\033[94m"
+COLOR_MAGENTA: Final[str] = "\033[95m"
+COLOR_CYAN: Final[str] = "\033[96m"
+COLOR_WHITE: Final[str] = "\033[97m"
+
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+
+_KILOBYTE: Final[int] = 1024
+_MEGABYTE: Final[int] = 1024 * 1024
+_GIGABYTE: Final[int] = 1024 * 1024 * 1024
+_MILLISECOND: Final[int] = 1000
+_MINUTE_MS: Final[int] = 60000
+
+
+# ==============================================================================
+# Data Classes
+# ==============================================================================
 
 
 @dataclass
 class ExecutionResult:
-    """Result of code execution."""
+    """Result of code execution.
+
+    Attributes:
+        stdout: Standard output from the executed code.
+        stderr: Standard error from the executed code.
+        peak_memory: Peak memory usage in bytes.
+        execution_time: Execution time in milliseconds.
+        cache_hit: Whether the result was served from cache.
+        actual_time: Actual wall-clock time in milliseconds.
+        cache_speedup: Speedup factor if cache hit, None otherwise.
+        wall_clock_timeout: Whether execution timed out.
+        output_truncated: Whether output was truncated.
+    """
+
     stdout: str
     stderr: str
     peak_memory: int
@@ -62,87 +109,101 @@ class ExecutionResult:
     output_truncated: bool = False
 
 
+# ==============================================================================
+# Utility Functions
+# ==============================================================================
+
+
 def format_bytes(bytes_val: int) -> str:
     """Convert bytes to human-readable format.
-    
+
     Args:
         bytes_val: Number of bytes.
-        
+
     Returns:
         Human-readable string representation (B, KB, MB, or GB).
     """
-    if bytes_val < 1024:
+    if bytes_val < _KILOBYTE:
         return f"{bytes_val} B"
-    elif bytes_val < 1024 * 1024:
-        return f"{bytes_val / 1024:.2f} KB"
-    elif bytes_val < 1024 * 1024 * 1024:
-        return f"{bytes_val / (1024 * 1024):.2f} MB"
-    else:
-        return f"{bytes_val / (1024 * 1024 * 1024):.2f} GB"
+    if bytes_val < _MEGABYTE:
+        return f"{bytes_val / _KILOBYTE:.2f} KB"
+    if bytes_val < _GIGABYTE:
+        return f"{bytes_val / _MEGABYTE:.2f} MB"
+    return f"{bytes_val / _GIGABYTE:.2f} GB"
 
 
 def format_duration(ms: float) -> str:
     """Convert milliseconds to human-readable format.
-    
+
     Args:
         ms: Duration in milliseconds.
-        
+
     Returns:
         Human-readable string representation (ms, s, or m:s).
     """
-    if ms < 1000:
+    if ms < _MILLISECOND:
         return f"{ms:.2f} ms"
-    elif ms < 60000:
-        return f"{ms / 1000:.2f} s"
-    else:
-        minutes = int(ms / 60000)
-        seconds = (ms % 60000) / 1000
-        return f"{minutes}m {seconds:.2f}s"
+    if ms < _MINUTE_MS:
+        return f"{ms / _MILLISECOND:.2f} s"
+    minutes = int(ms / _MINUTE_MS)
+    seconds = (ms % _MINUTE_MS) / _MILLISECOND
+    return f"{minutes}m {seconds:.2f}s"
+
+
+# ==============================================================================
+# Core Execution Functions
+# ==============================================================================
 
 
 def execute_code(
-    stub: Any,
+    stub: CodeExecutorStub,
     code: str,
-        description: str = "",
-        stdin_data: str = "",
-        language: str = "cpp",
+    language: str,
+    description: str = "",
+    stdin_data: str = "",
 ) -> ExecutionResult:
     """Execute code and return results with timing.
-    
+
     Args:
         stub: gRPC stub for the CodeExecutor service.
         code: Code to execute.
+        language: Execution language ("cpp" or "python").
         description: Optional description of the code.
         stdin_data: Data to feed to the program's standard input.
-                    Empty string means the program receives EOF immediately.
-        language: Execution language ("cpp" or "python").
-        
+            Empty string means the program receives EOF immediately.
+
     Returns:
         ExecutionResult containing stdout, stderr, timing, and cache status.
     """
     request: Any = sandbox_pb2.CodeRequest(
-        language=language, code=code, stdin_data=stdin_data
+        language=language,
+        code=code,
+        stdin_data=stdin_data,
     )
-    
+
     start_time = time.time()
     responses: Iterator[Any] = stub.Execute(request)
-    
+
     peak_memory = 0
     execution_time = 0.0
     cache_hit = False
     wall_clock_timeout = False
     output_truncated = False
     cached_execution_time = 0.0
-    stdout_output: List[str] = []
-    stderr_output: List[str] = []
-    
+    stdout_output: list[str] = []
+    stderr_output: list[str] = []
+
     for response in responses:
         if response.stdout_chunk:
             stdout_output.append(response.stdout_chunk)
-            print(response.stdout_chunk, end='', flush=True)
+            print(response.stdout_chunk, end="", flush=True)
         if response.stderr_chunk:
             stderr_output.append(response.stderr_chunk)
-            print(f"{COLOR_RED}STDERR: {response.stderr_chunk}{COLOR_RESET}", end='', flush=True)
+            print(
+                f"{COLOR_RED}STDERR: {response.stderr_chunk}{COLOR_RESET}",
+                end="",
+                flush=True,
+            )
         if response.peak_memory_bytes > 0:
             peak_memory = response.peak_memory_bytes
         if response.execution_time_ms > 0:
@@ -154,15 +215,15 @@ def execute_code(
             wall_clock_timeout = True
         if response.output_truncated:
             output_truncated = True
-    
-    actual_time = (time.time() - start_time) * 1000  # Convert to ms
-    cache_speedup = None
+
+    actual_time = (time.time() - start_time) * _MILLISECOND
+    cache_speedup: float | None = None
     if cache_hit and cached_execution_time > 0:
         cache_speedup = max(actual_time, 1) / max(cached_execution_time, 1)
-    
+
     return ExecutionResult(
-        stdout=''.join(stdout_output),
-        stderr=''.join(stderr_output),
+        stdout="".join(stdout_output),
+        stderr="".join(stderr_output),
         peak_memory=peak_memory,
         execution_time=execution_time,
         cache_hit=cache_hit,
@@ -175,65 +236,95 @@ def execute_code(
 
 def print_results(results: ExecutionResult, show_output: bool = False) -> None:
     """Print execution results in a formatted way.
-    
+
     Args:
         results: ExecutionResult to print.
-        show_output: Whether to show stdout/stderr output (defaults to False as output is now streamed).
+        show_output: Whether to show stdout/stderr output. Defaults to False
+            as output is now streamed.
     """
     if show_output:
         if results.stdout:
-            print(results.stdout, end='')
+            print(results.stdout, end="")
         if results.stderr:
-            # If stdout existed and didn't end with a newline, add one before STDERR
-            if results.stdout and not results.stdout.endswith('\n'):
+            # Add newline before STDERR if stdout didn't end with one
+            if results.stdout and not results.stdout.endswith("\n"):
                 print()
-            print(f"{COLOR_RED}STDERR: {results.stderr}{COLOR_RESET}", end='')
+            print(f"{COLOR_RED}STDERR: {results.stderr}{COLOR_RESET}", end="")
 
-        if not results.stdout and not results.stderr and results.execution_time > 0:
-            # Execution finished but produced no output - might be a silent crash or infrastructure error
+        if (
+            not results.stdout
+            and not results.stderr
+            and results.execution_time > 0
+        ):
+            # Execution finished but produced no output
             pass
-    
+
     print("-" * 50)
     print(f"{COLOR_CYAN}{COLOR_BOLD}📊 Resource Usage Summary:{COLOR_RESET}")
-    print(f"   💾 {COLOR_BOLD}Peak Memory:{COLOR_RESET} {COLOR_MAGENTA}{format_bytes(results.peak_memory)}{COLOR_RESET}")
-    print(f"   ⏱️  {COLOR_BOLD}Execution Time:{COLOR_RESET} {COLOR_GREEN}{format_duration(results.execution_time)}{COLOR_RESET}")
-    print(f"   🌐 {COLOR_BOLD}Network Time:{COLOR_RESET} {COLOR_BLUE}{format_duration(results.actual_time)}{COLOR_BLUE}{COLOR_RESET}")
-    cache_status = f"{COLOR_YELLOW}⚡ CACHE HIT{COLOR_RESET}" if results.cache_hit else f"{COLOR_WHITE}🆕 Fresh Execution{COLOR_RESET}"
+    print(
+        f"   💾 {COLOR_BOLD}Peak Memory:{COLOR_RESET} "
+        f"{COLOR_MAGENTA}{format_bytes(results.peak_memory)}{COLOR_RESET}"
+    )
+    print(
+        f"   ⏱️  {COLOR_BOLD}Execution Time:{COLOR_RESET} "
+        f"{COLOR_GREEN}{format_duration(results.execution_time)}{COLOR_RESET}"
+    )
+    print(
+        f"   🌐 {COLOR_BOLD}Network Time:{COLOR_RESET} "
+        f"{COLOR_BLUE}{format_duration(results.actual_time)}{COLOR_RESET}"
+    )
+    cache_status = (
+        f"{COLOR_YELLOW}⚡ CACHE HIT{COLOR_RESET}"
+        if results.cache_hit
+        else f"{COLOR_WHITE}🆕 Fresh Execution{COLOR_RESET}"
+    )
     print(f"   {cache_status}")
     if results.cache_speedup is not None:
         print(
-            f"   {COLOR_CYAN}⚡ Cache Speedup: {COLOR_BOLD}{results.cache_speedup:.2f}x faster{COLOR_RESET}"
+            f"   {COLOR_CYAN}⚡ Cache Speedup: "
+            f"{COLOR_BOLD}{results.cache_speedup:.2f}x faster{COLOR_RESET}"
         )
     if results.wall_clock_timeout:
-        print(f"   {COLOR_RED}{COLOR_BOLD}⏰ WALL-CLOCK TIMEOUT (process killed by sandbox){COLOR_RESET}")
+        print(
+            f"   {COLOR_RED}{COLOR_BOLD}⏰ WALL-CLOCK TIMEOUT "
+            "(process killed by sandbox){COLOR_RESET}"
+        )
     if results.output_truncated:
-        print(f"   {COLOR_RED}✂️  OUTPUT TRUNCATED (exceeded 10 KB combined output limit){COLOR_RESET}")
+        print(
+            f"   {COLOR_RED}✂️  OUTPUT TRUNCATED "
+            "(exceeded 10 KB combined output limit){COLOR_RESET}"
+        )
     print("=" * 50)
+
+
+# ==============================================================================
+# File Operations
+# ==============================================================================
 
 
 def read_code_from_file(file_path: Path) -> str:
     """Read source code from a file.
-    
+
     Args:
         file_path: Path to the source file.
-        
+
     Returns:
         Contents of the file as a string.
-        
+
     Raises:
         FileNotFoundError: If the file does not exist.
-        IOError: If the file cannot be read.
+        OSError: If the file cannot be read.
     """
-    with open(file_path, 'r', encoding='utf-8') as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         return f.read()
 
 
 def detect_language(file_path: Path) -> str:
     """Detect execution language from file extension.
-    
+
     Args:
         file_path: Path to the source file.
-        
+
     Returns:
         Language string for the server ("cpp" or "python").
     """
@@ -243,112 +334,162 @@ def detect_language(file_path: Path) -> str:
     return "cpp"
 
 
-def read_codes_from_directory(directory: Path, language: str) -> Dict[str, str]:
-    """Read all code files from a directory.
-    
+def detect_language_from_directory(directory: Path) -> str:
+    """Detect execution language from directory name.
+
+    The function checks if the directory name contains 'python' to determine
+    the language. Otherwise, it defaults to 'cpp'.
+
     Args:
         directory: Path to the directory containing code files.
-        language: Execution language ("cpp" or "python").
-        
+
     Returns:
-        Dictionary mapping file names to their contents.
-        
+        Language string for the server ("cpp" or "python").
+    """
+    dir_name = directory.name.lower()
+    if "python" in dir_name:
+        return "python"
+    return "cpp"
+
+
+def read_codes_from_directory(directory: Path) -> dict[str, tuple[str, str]]:
+    """Read all code files from a directory.
+
+    Language is automatically detected from the directory name.
+    Files are returned with their detected language.
+
+    Args:
+        directory: Path to the directory containing code files.
+
+    Returns:
+        Dictionary mapping file names to tuples of (code, language).
+
     Raises:
         FileNotFoundError: If the directory does not exist.
     """
-    codes: Dict[str, str] = {}
+    codes: dict[str, tuple[str, str]] = {}
     if not directory.exists():
         raise FileNotFoundError(f"Directory not found: {directory}")
 
+    language = detect_language_from_directory(directory)
     extension = ".py" if language == "python" else ".cpp"
+
     for file_path in directory.glob(f"*{extension}"):
         try:
-            codes[file_path.stem] = read_code_from_file(file_path)
-        except IOError as e:
+            code = read_code_from_file(file_path)
+            codes[file_path.stem] = (code, language)
+        except OSError as e:
             print(f"Warning: Could not read {file_path}: {e}")
 
     return codes
 
 
+# ==============================================================================
+# Execution Helpers
+# ==============================================================================
+
+
 def execute_single_code(
-    stub: Any,
-    name: str,
-        code: str,
-        stdin_data: str = "",
-        language: str = "cpp",
+    stub: CodeExecutorStub,
+    file_path: Path,
+    stdin_data: str = "",
 ) -> None:
     """Execute a single code example and print results.
-    
+
+    Language is automatically detected from the file extension.
+
     Args:
         stub: gRPC stub for the CodeExecutor service.
-        name: Name/description of the code example.
-        code: Code to execute.
+        file_path: Path to the source file to execute.
         stdin_data: Data to feed to the program's standard input.
-        language: Execution language ("cpp" or "python").
     """
+    code = read_code_from_file(file_path)
+    language = detect_language(file_path)
+    name = file_path.stem
+
     print(f"\n📝 {name}")
     print("=" * 50)
     results = execute_code(
-        stub, code, name, stdin_data=stdin_data, language=language
+        stub,
+        code,
+        language,
+        name,
+        stdin_data=stdin_data,
     )
     print_results(results)
 
 
 def execute_codes_from_directory(
-    stub: Any,
+    stub: CodeExecutorStub,
     directory: Path,
     repeat_for_cache_demo: bool = False,
-    language: str = "cpp",
 ) -> None:
     """Execute all code files from a directory.
-    
+
+    Language is automatically detected from the directory name.
+
     Args:
         stub: gRPC stub for the CodeExecutor service.
         directory: Path to the directory containing code files.
-        repeat_for_cache_demo: Whether to run each file twice to demonstrate caching.
-        language: Execution language ("cpp" or "python").
+        repeat_for_cache_demo: Whether to run each file twice to
+            demonstrate caching.
     """
-    codes = read_codes_from_directory(directory, language)
+    codes = read_codes_from_directory(directory)
+    language = detect_language_from_directory(directory)
 
     extension = ".py" if language == "python" else ".cpp"
     if not codes:
         print(f"{COLOR_YELLOW}No {extension} files found in {directory}{COLOR_RESET}")
         return
 
-    print(f"\n{COLOR_CYAN}📁 Found {len(codes)} code file(s) in {directory}{COLOR_RESET}")
+    print(
+        f"\n{COLOR_CYAN}📁 Found {len(codes)} code file(s) in {directory}{COLOR_RESET}"
+    )
     print("=" * 60)
 
-    for name, code in codes.items():
+    for name, (code, file_language) in codes.items():
         print(f"\n{COLOR_WHITE}{COLOR_BOLD}🔴 {name} - First Run{COLOR_RESET}")
         print("-" * 60)
-        results1 = execute_code(stub, code, name, language=language)
+        results1 = execute_code(stub, code, file_language, name)
         print_results(results1)
 
         if repeat_for_cache_demo:
             time.sleep(0.5)
-            print(f"\n{COLOR_GREEN}{COLOR_BOLD}🟢 {name} - Second Run (Cache Demo){COLOR_RESET}")
+            print(
+                f"\n{COLOR_GREEN}{COLOR_BOLD}🟢 {name} - "
+                f"Second Run (Cache Demo){COLOR_RESET}"
+            )
             print("-" * 60)
             results2 = execute_code(
-                stub, code, name + " - cached", language=language
+                stub,
+                code,
+                file_language,
+                f"{name} - cached",
             )
             print_results(results2)
 
             if results2.cache_speedup is not None:
                 print(
-                    f"\n{COLOR_CYAN}⚡ Cache Speedup: {COLOR_BOLD}{results2.cache_speedup:.2f}x faster{COLOR_RESET}"
+                    f"\n{COLOR_CYAN}⚡ Cache Speedup: "
+                    f"{COLOR_BOLD}{results2.cache_speedup:.2f}x faster{COLOR_RESET}"
                 )
+
+
+# ==============================================================================
+# Example Management
+# ==============================================================================
 
 
 def create_default_examples_directory(directory: Path) -> None:
     """Create default example code files in the specified directory.
-    
+
     Args:
         directory: Path to create the examples directory.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    
-    examples: Dict[str, str] = {
-        "hello_world": '''#include <iostream>
+
+    examples: dict[str, str] = {
+        "hello_world": """#include <iostream>
 
 int main() {
     std::cout << "Hello, World!" << std::endl;
@@ -357,8 +498,8 @@ int main() {
     }
     return 0;
 }
-''',
-        "fibonacci": '''#include <iostream>
+""",
+        "fibonacci": """#include <iostream>
 #include <cmath>
 
 int main() {
@@ -374,8 +515,8 @@ int main() {
     std::cout << std::endl;
     return 0;
 }
-''',
-        "squares": '''#include <iostream>
+""",
+        "squares": """#include <iostream>
 int main() {
     std::cout << "Squares of 1-10:" << std::endl;
     for (int i = 1; i <= 10; i++) {
@@ -383,8 +524,8 @@ int main() {
     }
     return 0;
 }
-''',
-        "cubes": '''#include <iostream>
+""",
+        "cubes": """#include <iostream>
 int main() {
     std::cout << "Cubes of 1-10:" << std::endl;
     for (int i = 1; i <= 10; i++) {
@@ -392,8 +533,8 @@ int main() {
     }
     return 0;
 }
-''',
-        "computation": '''#include <iostream>
+""",
+        "computation": """#include <iostream>
 #include <cmath>
 
 int main() {
@@ -405,8 +546,8 @@ int main() {
     std::cout << "Sum of square roots: " << result << std::endl;
     return 0;
 }
-''',
-        "memory_test": '''#include <iostream>
+""",
+        "memory_test": """#include <iostream>
 #include <vector>
 
 int main() {
@@ -420,8 +561,8 @@ int main() {
     std::cout << "Memory test complete!" << std::endl;
     return 0;
 }
-''',
-        "sandbox_safe": '''#include <iostream>
+""",
+        "sandbox_safe": """#include <iostream>
 #include <vector>
 
 int main() {
@@ -433,26 +574,31 @@ int main() {
     std::cout << "Processed " << data.size() << " elements safely." << std::endl;
     return 0;
 }
-'''
+""",
     }
-    
+
     for name, code in examples.items():
         file_path = directory / f"{name}.cpp"
         if not file_path.exists():
-            with open(file_path, 'w', encoding='utf-8') as f:
+            with open(file_path, "w", encoding="utf-8") as f:
                 f.write(code)
             print(f"Created: {file_path}")
 
 
-def run_interactive_mode(stub: Any) -> None:
+# ==============================================================================
+# Interactive Mode
+# ==============================================================================
+
+
+def run_interactive_mode(stub: CodeExecutorStub) -> None:
     """Run interactive mode for executing code from files.
-    
+
     Args:
         stub: gRPC stub for the CodeExecutor service.
     """
     examples_dir = Path("examples")
     create_default_examples_directory(examples_dir)
-    
+
     while True:
         print("\n" + "=" * 60)
         print("DCodeX Python Client - Interactive Mode")
@@ -462,22 +608,23 @@ def run_interactive_mode(stub: Any) -> None:
         print("3. Execute a specific file")
         print("4. Exit")
         print("-" * 60)
-        
+
         choice = input("Enter choice (1-4): ").strip()
-        
+
         if choice == "1":
             execute_codes_from_directory(stub, examples_dir)
         elif choice == "2":
-            execute_codes_from_directory(stub, examples_dir, repeat_for_cache_demo=True)
+            execute_codes_from_directory(
+                stub,
+                examples_dir,
+                repeat_for_cache_demo=True,
+            )
         elif choice == "3":
-            file_path = input("Enter file path: ").strip()
+            file_path_str = input("Enter file path: ").strip()
             try:
-                code = read_code_from_file(Path(file_path))
-                language = detect_language(Path(file_path))
-                execute_single_code(
-                    stub, Path(file_path).stem, code, language=language
-                )
-            except (FileNotFoundError, IOError) as e:
+                file_path = Path(file_path_str)
+                execute_single_code(stub, file_path)
+            except (FileNotFoundError, OSError) as e:
                 print(f"Error: {e}")
         elif choice == "4":
             print("Exiting...")
@@ -486,70 +633,77 @@ def run_interactive_mode(stub: Any) -> None:
             print("Invalid choice. Please try again.")
 
 
-def run_all_examples(stub: Any) -> None:
+def run_all_examples(stub: CodeExecutorStub) -> None:
     """Run all default examples.
-    
+
     Args:
         stub: gRPC stub for the CodeExecutor service.
     """
     examples_dir = Path("examples")
     create_default_examples_directory(examples_dir)
-    
+
     print("\n" + "🚀" * 30)
     print("  DCodeX Feature Showcase")
     print("  Features: Resource Monitoring | Smart Caching | Sandboxing")
     print("🚀" * 30)
-    
-    execute_codes_from_directory(stub, examples_dir, repeat_for_cache_demo=True)
-    
+
+    execute_codes_from_directory(
+        stub,
+        examples_dir,
+        repeat_for_cache_demo=True,
+    )
+
     print("\n" + "=" * 60)
     print("✨ All examples completed!")
     print("Features demonstrated:")
     print("  📊 Peak memory tracking")
     print("  ⏱️  Execution time measurement")
-    print("  💾 Result caching with FNV-1a hashing")
+    print("  💾 Result caching with absl::Hash")
     print("  ⚡ Cache hit/miss detection")
     print("  🛡️  Sandboxed execution")
     print("=" * 60)
 
 
+# ==============================================================================
+# Main Entry Point
+# ==============================================================================
+
+
 def main() -> None:
     """Main entry point for the client."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
-        description="DCodeX Python Client - Execute code with resource monitoring"
+        description="DCodeX Python Client - Execute code with resource monitoring",
     )
     parser.add_argument(
         "--server",
         default="localhost:50051",
-        help="Server address (default: localhost:50051)"
+        help="Server address (default: localhost:50051)",
     )
     parser.add_argument(
-        "--interactive", "-i",
+        "--interactive",
+        "-i",
         action="store_true",
-        help="Run in interactive mode"
+        help="Run in interactive mode",
     )
     parser.add_argument(
-        "--directory", "-d",
+        "--directory",
+        "-d",
         type=Path,
-        help="Directory containing code files to execute"
+        help="Directory containing code files to execute",
     )
     parser.add_argument(
-        "--file", "-f",
+        "--file",
+        "-f",
         type=Path,
-        help="Specific code file to execute"
+        help="Specific code file to execute",
     )
     parser.add_argument(
-        "--language", "-l",
-        choices=("cpp", "python"),
-        default=None,
-        help="Override language detection for --file/--directory"
-    )
-    parser.add_argument(
-        "--cache-demo", "-c",
+        "--cache-demo",
+        "-c",
         action="store_true",
-        help="Run each file twice to demonstrate caching"
+        help="Run each file twice to demonstrate caching",
     )
     parser.add_argument(
         "--stdin",
@@ -558,7 +712,7 @@ def main() -> None:
             "Data to pass to the program's standard input. "
             "Use \\n for newlines, e.g. --stdin 'Alice\\n3\\n10\\n20\\n30\\n'. "
             "Only used with --file."
-        )
+        ),
     )
     parser.add_argument(
         "--stdin-file",
@@ -567,9 +721,9 @@ def main() -> None:
         help=(
             "Path to a file whose contents are passed to the program's stdin. "
             "Only used with --file. Takes precedence over --stdin."
-        )
+        ),
     )
-    
+
     args = parser.parse_args()
 
     # Resolve stdin_data: --stdin-file takes precedence over --stdin.
@@ -577,38 +731,35 @@ def main() -> None:
     if args.stdin_file:
         try:
             stdin_data = args.stdin_file.read_text(encoding="utf-8")
-        except (FileNotFoundError, IOError) as e:
+        except (FileNotFoundError, OSError) as e:
             print(f"Error reading stdin file: {e}")
             sys.exit(1)
     elif args.stdin:
         # Allow the user to write \n literally on the command line and have it
         # interpreted as a real newline character.
         stdin_data = args.stdin.replace("\\n", "\n")
-    
+
     # Connect to server
     channel = grpc.insecure_channel(args.server)
-    stub: Any = sandbox_pb2_grpc.CodeExecutorStub(channel)
-    
+    stub: CodeExecutorStub = sandbox_pb2_grpc.CodeExecutorStub(channel)
+
     if args.file:
-        # Execute specific file
+        # Execute specific file - language auto-detected from file extension
         try:
-            code = read_code_from_file(args.file)
-            language = args.language or detect_language(args.file)
             execute_single_code(
                 stub,
-                args.file.stem,
-                code,
+                args.file,
                 stdin_data=stdin_data,
-                language=language,
             )
-        except (FileNotFoundError, IOError) as e:
+        except (FileNotFoundError, OSError) as e:
             print(f"Error: {e}")
             sys.exit(1)
     elif args.directory:
-        # Execute all files from directory
-        language = args.language or "cpp"
+        # Execute all files from directory - language auto-detected from dir name
         execute_codes_from_directory(
-            stub, args.directory, args.cache_demo, language=language
+            stub,
+            args.directory,
+            args.cache_demo,
         )
     elif args.interactive:
         # Run interactive mode
@@ -618,5 +769,5 @@ def main() -> None:
         run_all_examples(stub)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

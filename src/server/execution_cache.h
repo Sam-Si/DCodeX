@@ -16,10 +16,10 @@
 #define SRC_SERVER_EXECUTION_CACHE_H_
 
 #include <cstdint>
+#include <list>
 #include <memory>
 
 #include "absl/container/flat_hash_map.h"
-#include "absl/container/inlined_vector.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -53,7 +53,7 @@ class ExecutionCache {
   // Stores result in cache.
   void Put(absl::string_view code_hash, const CachedResult& result);
 
-  // Computes hash of code using FNV-1a algorithm.
+  // Computes hash of code using absl::Hash.
   // Returns error status if hash computation fails.
   static absl::StatusOr<std::string> ComputeHash(absl::string_view code);
 
@@ -67,14 +67,21 @@ class ExecutionCache {
   size_t Size() const;
 
  private:
+  // LRU list type: stores hash keys. Front = most recently used.
+  using LruList = std::list<std::string>;
+  using LruIterator = LruList::iterator;
+
+  // Cache entry containing the result and iterator to the LRU list node.
+  struct CacheEntry {
+    std::shared_ptr<CachedResult> result;
+    LruIterator lru_iterator;
+  };
+
   mutable absl::Mutex mutex_;
-  absl::flat_hash_map<std::string, std::shared_ptr<CachedResult>> cache_
-      ABSL_GUARDED_BY(mutex_);
+  absl::flat_hash_map<std::string, CacheEntry> cache_ ABSL_GUARDED_BY(mutex_);
+  LruList lru_list_ ABSL_GUARDED_BY(mutex_);
   const absl::Duration ttl_;
   const size_t max_entries_;
-
-  // LRU tracking using inlined vector for better cache locality.
-  absl::InlinedVector<std::string, 16> access_order_ ABSL_GUARDED_BY(mutex_);
 
   void EvictIfNeeded() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   bool IsExpired(const CachedResult& result) const;
