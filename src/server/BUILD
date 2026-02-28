@@ -20,7 +20,7 @@ cc_library(
 cc_library(
     name = "sandbox",
     srcs = ["sandbox.cpp"],
-    hdrs = ["sandbox.h"],
+    hdrs = ["sandbox.h", "output_filter.h", "process_runner.h", "temp_file_manager.h"],
     copts = ["-std=c++23"],
     deps = [
         ":execution_cache",

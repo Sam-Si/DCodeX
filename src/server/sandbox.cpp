@@ -14,232 +14,28 @@
 
 #include "src/server/sandbox.h"
 
-#include <fcntl.h>
-#include <signal.h>
 #include <sys/resource.h>
-#include <sys/select.h>
-#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <array>
 #include <filesystem>
-#include <fstream>
 
-#include "absl/cleanup/cleanup.h"
-#include "absl/container/inlined_vector.h"
-#include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "src/server/process_runner.h"
+#include "src/server/temp_file_manager.h"
 
 namespace dcodex {
 
 namespace {
 
-// --- SRP: Output Filtering ---
-class OutputFilterStrategy {
- public:
-  virtual ~OutputFilterStrategy() = default;
-  virtual bool ShouldSuppress(absl::string_view chunk) const = 0;
-};
-
-class DefaultOutputFilterStrategy final : public OutputFilterStrategy {
- public:
-  bool ShouldSuppress(absl::string_view chunk) const override {
-    if (chunk.find("rosetta error:") != absl::string_view::npos) {
-      return true;
-    }
-    // Handle cases where the message might be slightly different or fragmented
-    if (chunk.find("mmap_anonymous_rw mmap failed") != absl::string_view::npos) {
-      return true;
-    }
-    return false;
-  }
-};
-
-const OutputFilterStrategy& GetOutputFilter() {
-  static DefaultOutputFilterStrategy filter;
-  return filter;
-}
-
 // --- SRP: Resource Monitoring Constants ---
 constexpr int kWallClockTimeoutSeconds = SandboxLimits::kWallClockTimeoutSeconds;
 
-// --- SRP: File Management ---
-class TempFileManager {
- public:
-  static std::string WriteTempFile(absl::string_view extension,
-                                   absl::string_view content) {
-    char template_str[] = "/tmp/dcodex_XXXXXX";
-    int fd_val = mkstemp(template_str);
-    if (fd_val == -1) return "";
-    close(fd_val);
-
-    std::string path = absl::StrCat(template_str, extension);
-    std::ofstream out(path);
-    out << content;
-    return path;
-  }
-
-  class Guard {
-   public:
-    explicit Guard(std::filesystem::path path) : path_(std::move(path)) {}
-    ~Guard() {
-      if (!path_.empty()) {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-      }
-    }
-    void Release() { path_.clear(); }
-   private:
-    std::filesystem::path path_;
-  };
-};
-
-// --- SRP: Process Management (RAII) ---
-class FileDescriptor {
- public:
-  explicit FileDescriptor(int fd = -1) noexcept : fd_(fd) {}
-  ~FileDescriptor() { Reset(); }
-  FileDescriptor(FileDescriptor&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
-  FileDescriptor& operator=(FileDescriptor&& other) noexcept {
-    if (this != &other) { Reset(); fd_ = other.fd_; other.fd_ = -1; }
-    return *this;
-  }
-  int Get() const noexcept { return fd_; }
-  bool IsValid() const noexcept { return fd_ != -1; }
-  void Reset(int fd = -1) noexcept {
-    if (fd_ != -1) close(fd_);
-    fd_ = fd;
-  }
- private:
-  int fd_;
-};
-
-class PipePair {
- public:
-  bool Create() {
-    int fds[2];
-    if (pipe(fds) == -1) return false;
-    read_end_.Reset(fds[0]);
-    write_end_.Reset(fds[1]);
-    return true;
-  }
-  int ReadFd() const noexcept { return read_end_.Get(); }
-  int WriteFd() const noexcept { return write_end_.Get(); }
-  void CloseRead() noexcept { read_end_.Reset(); }
-  void CloseWrite() noexcept { write_end_.Reset(); }
- private:
-  FileDescriptor read_end_;
-  FileDescriptor write_end_;
-};
-
-// --- SRP: Process Execution Logic ---
-class ProcessRunner {
- public:
-  static void ApplyResourceLimits() {
-    struct rlimit cpu_limit{SandboxLimits::kCpuTimeLimitSeconds,
-                            SandboxLimits::kCpuTimeLimitSeconds};
-    setrlimit(RLIMIT_CPU, &cpu_limit);
-    struct rlimit mem_limit{SandboxLimits::kMemoryLimitBytes,
-                            SandboxLimits::kMemoryLimitBytes};
-    setrlimit(RLIMIT_AS, &mem_limit);
-  }
-
-  static void RedirectAndExec(absl::Span<const std::string> argv,
-                              int stdin_fd, int stdout_fd, int stderr_fd,
-                              bool sandboxed) {
-    if (sandboxed) ApplyResourceLimits();
-    dup2(stdin_fd, STDIN_FILENO);
-    dup2(stdout_fd, STDOUT_FILENO);
-    dup2(stderr_fd, STDERR_FILENO);
-
-    std::vector<char*> c_argv;
-    for (const auto& arg : argv) c_argv.push_back(const_cast<char*>(arg.c_str()));
-    c_argv.push_back(nullptr);
-    execvp(c_argv[0], c_argv.data());
-    exit(1);
-  }
-
-  static bool ReadOutput(int stdout_fd, int stderr_fd, pid_t child_pid,
-                         const OutputCallback& callback, bool& truncated) {
-    std::array<char, 4096> buffer{};
-    bool stdout_open = true, stderr_open = true;
-    size_t total_bytes = 0;
-    truncated = false;
-
-    while (stdout_open || stderr_open) {
-      fd_set read_fds;
-      FD_ZERO(&read_fds);
-      int max_fd = -1;
-      if (stdout_open) { FD_SET(stdout_fd, &read_fds); max_fd = std::max(max_fd, stdout_fd); }
-      if (stderr_open) { FD_SET(stderr_fd, &read_fds); max_fd = std::max(max_fd, stderr_fd); }
-      if (max_fd == -1) break;
-
-      struct timeval tv{0, 100000};
-      int activity = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
-      if (activity < 0) break;
-      if (activity == 0) continue;
-
-      auto read_from = [&](int fd, bool is_stdout, bool& open_flag) {
-        if (open_flag && FD_ISSET(fd, &read_fds)) {
-          ssize_t n = read(fd, buffer.data(), buffer.size());
-          if (n <= 0) {
-            open_flag = false;
-          } else {
-            total_bytes += n;
-            absl::string_view chunk(buffer.data(), static_cast<size_t>(n));
-            if (is_stdout) {
-              callback(chunk, "");
-            } else {
-              if (GetOutputFilter().ShouldSuppress(chunk)) {
-                return;
-              }
-              callback("", chunk);
-            }
-          }
-        }
-      };
-
-      read_from(stdout_fd, true, stdout_open);
-      read_from(stderr_fd, false, stderr_open);
-
-      if (total_bytes >= SandboxLimits::kMaxOutputBytes) {
-        kill(child_pid, SIGKILL);
-        truncated = true;
-        callback("", absl::StrFormat("\n[Output truncated: exceeded %zu KB limit]\n",
-                                    SandboxLimits::kMaxOutputBytes / 1024));
-        break;
-      }
-    }
-    return truncated;
-  }
-
-  static bool WaitWithTimeout(pid_t child_pid, pid_t watcher_pid, int& status, struct rusage& usage) {
-    if (wait4(child_pid, &status, 0, &usage) == -1) return false;
-    bool killed_by_sig = WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
-    
-    int watcher_status = 0;
-    pid_t reaped_watcher = 0;
-    for (int i = 0; i < 10; ++i) {
-      reaped_watcher = waitpid(watcher_pid, &watcher_status, WNOHANG);
-      if (reaped_watcher == watcher_pid) break;
-      usleep(1000);
-    }
-
-    if (reaped_watcher == watcher_pid) {
-      if (WIFEXITED(watcher_status) && WEXITSTATUS(watcher_status) == 0 && killed_by_sig) return true;
-    }
-
-    if (reaped_watcher == 0) {
-      kill(watcher_pid, SIGKILL);
-      waitpid(watcher_pid, nullptr, 0);
-    }
-    return false;
-  }
-};
+using internal::ProcessRunner;
+using internal::TempFileManager;
+using internal::PipePair;
 
 // --- SRP: Global Cache Management ---
 class CacheHolder {
