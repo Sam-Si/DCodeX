@@ -158,19 +158,19 @@ def format_duration(ms: float) -> str:
 def execute_code(
     stub: CodeExecutorStub,
     code: str,
+    language: str,
     description: str = "",
     stdin_data: str = "",
-    language: str = "cpp",
 ) -> ExecutionResult:
     """Execute code and return results with timing.
 
     Args:
         stub: gRPC stub for the CodeExecutor service.
         code: Code to execute.
+        language: Execution language ("cpp" or "python").
         description: Optional description of the code.
         stdin_data: Data to feed to the program's standard input.
             Empty string means the program receives EOF immediately.
-        language: Execution language ("cpp" or "python").
 
     Returns:
         ExecutionResult containing stdout, stderr, timing, and cache status.
@@ -334,30 +334,50 @@ def detect_language(file_path: Path) -> str:
     return "cpp"
 
 
-def read_codes_from_directory(
-    directory: Path,
-    language: str,
-) -> dict[str, str]:
-    """Read all code files from a directory.
+def detect_language_from_directory(directory: Path) -> str:
+    """Detect execution language from directory name.
+
+    The function checks if the directory name contains 'python' to determine
+    the language. Otherwise, it defaults to 'cpp'.
 
     Args:
         directory: Path to the directory containing code files.
-        language: Execution language ("cpp" or "python").
 
     Returns:
-        Dictionary mapping file names to their contents.
+        Language string for the server ("cpp" or "python").
+    """
+    dir_name = directory.name.lower()
+    if "python" in dir_name:
+        return "python"
+    return "cpp"
+
+
+def read_codes_from_directory(directory: Path) -> dict[str, tuple[str, str]]:
+    """Read all code files from a directory.
+
+    Language is automatically detected from the directory name.
+    Files are returned with their detected language.
+
+    Args:
+        directory: Path to the directory containing code files.
+
+    Returns:
+        Dictionary mapping file names to tuples of (code, language).
 
     Raises:
         FileNotFoundError: If the directory does not exist.
     """
-    codes: dict[str, str] = {}
+    codes: dict[str, tuple[str, str]] = {}
     if not directory.exists():
         raise FileNotFoundError(f"Directory not found: {directory}")
 
+    language = detect_language_from_directory(directory)
     extension = ".py" if language == "python" else ".cpp"
+
     for file_path in directory.glob(f"*{extension}"):
         try:
-            codes[file_path.stem] = read_code_from_file(file_path)
+            code = read_code_from_file(file_path)
+            codes[file_path.stem] = (code, language)
         except OSError as e:
             print(f"Warning: Could not read {file_path}: {e}")
 
@@ -371,28 +391,30 @@ def read_codes_from_directory(
 
 def execute_single_code(
     stub: CodeExecutorStub,
-    name: str,
-    code: str,
+    file_path: Path,
     stdin_data: str = "",
-    language: str = "cpp",
 ) -> None:
     """Execute a single code example and print results.
 
+    Language is automatically detected from the file extension.
+
     Args:
         stub: gRPC stub for the CodeExecutor service.
-        name: Name/description of the code example.
-        code: Code to execute.
+        file_path: Path to the source file to execute.
         stdin_data: Data to feed to the program's standard input.
-        language: Execution language ("cpp" or "python").
     """
+    code = read_code_from_file(file_path)
+    language = detect_language(file_path)
+    name = file_path.stem
+
     print(f"\n📝 {name}")
     print("=" * 50)
     results = execute_code(
         stub,
         code,
+        language,
         name,
         stdin_data=stdin_data,
-        language=language,
     )
     print_results(results)
 
@@ -401,18 +423,19 @@ def execute_codes_from_directory(
     stub: CodeExecutorStub,
     directory: Path,
     repeat_for_cache_demo: bool = False,
-    language: str = "cpp",
 ) -> None:
     """Execute all code files from a directory.
+
+    Language is automatically detected from the directory name.
 
     Args:
         stub: gRPC stub for the CodeExecutor service.
         directory: Path to the directory containing code files.
         repeat_for_cache_demo: Whether to run each file twice to
             demonstrate caching.
-        language: Execution language ("cpp" or "python").
     """
-    codes = read_codes_from_directory(directory, language)
+    codes = read_codes_from_directory(directory)
+    language = detect_language_from_directory(directory)
 
     extension = ".py" if language == "python" else ".cpp"
     if not codes:
@@ -424,10 +447,10 @@ def execute_codes_from_directory(
     )
     print("=" * 60)
 
-    for name, code in codes.items():
+    for name, (code, file_language) in codes.items():
         print(f"\n{COLOR_WHITE}{COLOR_BOLD}🔴 {name} - First Run{COLOR_RESET}")
         print("-" * 60)
-        results1 = execute_code(stub, code, name, language=language)
+        results1 = execute_code(stub, code, file_language, name)
         print_results(results1)
 
         if repeat_for_cache_demo:
@@ -440,8 +463,8 @@ def execute_codes_from_directory(
             results2 = execute_code(
                 stub,
                 code,
+                file_language,
                 f"{name} - cached",
-                language=language,
             )
             print_results(results2)
 
@@ -597,16 +620,10 @@ def run_interactive_mode(stub: CodeExecutorStub) -> None:
                 repeat_for_cache_demo=True,
             )
         elif choice == "3":
-            file_path = input("Enter file path: ").strip()
+            file_path_str = input("Enter file path: ").strip()
             try:
-                code = read_code_from_file(Path(file_path))
-                language = detect_language(Path(file_path))
-                execute_single_code(
-                    stub,
-                    Path(file_path).stem,
-                    code,
-                    language=language,
-                )
+                file_path = Path(file_path_str)
+                execute_single_code(stub, file_path)
             except (FileNotFoundError, OSError) as e:
                 print(f"Error: {e}")
         elif choice == "4":
@@ -683,13 +700,6 @@ def main() -> None:
         help="Specific code file to execute",
     )
     parser.add_argument(
-        "--language",
-        "-l",
-        choices=("cpp", "python"),
-        default=None,
-        help="Override language detection for --file/--directory",
-    )
-    parser.add_argument(
         "--cache-demo",
         "-c",
         action="store_true",
@@ -734,28 +744,22 @@ def main() -> None:
     stub: CodeExecutorStub = sandbox_pb2_grpc.CodeExecutorStub(channel)
 
     if args.file:
-        # Execute specific file
+        # Execute specific file - language auto-detected from file extension
         try:
-            code = read_code_from_file(args.file)
-            language = args.language or detect_language(args.file)
             execute_single_code(
                 stub,
-                args.file.stem,
-                code,
+                args.file,
                 stdin_data=stdin_data,
-                language=language,
             )
         except (FileNotFoundError, OSError) as e:
             print(f"Error: {e}")
             sys.exit(1)
     elif args.directory:
-        # Execute all files from directory
-        language = args.language or "cpp"
+        # Execute all files from directory - language auto-detected from dir name
         execute_codes_from_directory(
             stub,
             args.directory,
             args.cache_demo,
-            language=language,
         )
     elif args.interactive:
         # Run interactive mode
