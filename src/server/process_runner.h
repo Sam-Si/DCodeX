@@ -111,7 +111,7 @@ class ProcessRunner {
       if (stderr_open) { FD_SET(stderr_fd, &read_fds); max_fd = std::max(max_fd, stderr_fd); }
       if (max_fd == -1) break;
 
-      struct timeval tv{0, 100000};
+      struct timeval tv{0, 10000};
       int activity = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
       if (activity < 0) break;
       if (activity == 0) continue;

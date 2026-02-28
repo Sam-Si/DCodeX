@@ -26,6 +26,17 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List
 
 import grpc
 
+# ANSI Color Codes
+COLOR_RESET = "\033[0m"
+COLOR_BOLD = "\033[1m"
+COLOR_RED = "\033[91m"
+COLOR_GREEN = "\033[92m"
+COLOR_YELLOW = "\033[93m"
+COLOR_BLUE = "\033[94m"
+COLOR_MAGENTA = "\033[95m"
+COLOR_CYAN = "\033[96m"
+COLOR_WHITE = "\033[97m"
+
 # Add the current directory to sys.path to find generated modules
 sys.path.append(os.path.join(os.path.dirname(__file__), "."))
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -46,6 +57,7 @@ class ExecutionResult:
     execution_time: float
     cache_hit: bool
     actual_time: float
+    cache_speedup: float | None = None
     wall_clock_timeout: bool = False
     output_truncated: bool = False
 
@@ -93,21 +105,23 @@ def execute_code(
     code: str,
         description: str = "",
         stdin_data: str = "",
+        language: str = "cpp",
 ) -> ExecutionResult:
     """Execute code and return results with timing.
     
     Args:
         stub: gRPC stub for the CodeExecutor service.
-        code: C++ code to execute.
+        code: Code to execute.
         description: Optional description of the code.
         stdin_data: Data to feed to the program's standard input.
                     Empty string means the program receives EOF immediately.
+        language: Execution language ("cpp" or "python").
         
     Returns:
         ExecutionResult containing stdout, stderr, timing, and cache status.
     """
     request: Any = sandbox_pb2.CodeRequest(
-        language="cpp", code=code, stdin_data=stdin_data
+        language=language, code=code, stdin_data=stdin_data
     )
     
     start_time = time.time()
@@ -118,25 +132,33 @@ def execute_code(
     cache_hit = False
     wall_clock_timeout = False
     output_truncated = False
+    cached_execution_time = 0.0
     stdout_output: List[str] = []
     stderr_output: List[str] = []
     
     for response in responses:
         if response.stdout_chunk:
             stdout_output.append(response.stdout_chunk)
+            print(response.stdout_chunk, end='', flush=True)
         if response.stderr_chunk:
             stderr_output.append(response.stderr_chunk)
+            print(f"{COLOR_RED}STDERR: {response.stderr_chunk}{COLOR_RESET}", end='', flush=True)
         if response.peak_memory_bytes > 0:
             peak_memory = response.peak_memory_bytes
         if response.execution_time_ms > 0:
             execution_time = response.execution_time_ms
         cache_hit = response.cache_hit
+        if response.cache_hit and response.execution_time_ms > 0:
+            cached_execution_time = response.execution_time_ms
         if response.wall_clock_timeout:
             wall_clock_timeout = True
         if response.output_truncated:
             output_truncated = True
     
     actual_time = (time.time() - start_time) * 1000  # Convert to ms
+    cache_speedup = None
+    if cache_hit and cached_execution_time > 0:
+        cache_speedup = max(actual_time, 1) / max(cached_execution_time, 1)
     
     return ExecutionResult(
         stdout=''.join(stdout_output),
@@ -145,17 +167,18 @@ def execute_code(
         execution_time=execution_time,
         cache_hit=cache_hit,
         actual_time=actual_time,
+        cache_speedup=cache_speedup,
         wall_clock_timeout=wall_clock_timeout,
         output_truncated=output_truncated,
     )
 
 
-def print_results(results: ExecutionResult, show_output: bool = True) -> None:
+def print_results(results: ExecutionResult, show_output: bool = False) -> None:
     """Print execution results in a formatted way.
     
     Args:
         results: ExecutionResult to print.
-        show_output: Whether to show stdout/stderr output.
+        show_output: Whether to show stdout/stderr output (defaults to False as output is now streamed).
     """
     if show_output:
         if results.stdout:
@@ -164,31 +187,35 @@ def print_results(results: ExecutionResult, show_output: bool = True) -> None:
             # If stdout existed and didn't end with a newline, add one before STDERR
             if results.stdout and not results.stdout.endswith('\n'):
                 print()
-            print(f"STDERR: {results.stderr}", end='')
+            print(f"{COLOR_RED}STDERR: {results.stderr}{COLOR_RESET}", end='')
 
         if not results.stdout and not results.stderr and results.execution_time > 0:
             # Execution finished but produced no output - might be a silent crash or infrastructure error
             pass
     
     print("-" * 50)
-    print("📊 Resource Usage Summary:")
-    print(f"   💾 Peak Memory: {format_bytes(results.peak_memory)}")
-    print(f"   ⏱️  Execution Time: {format_duration(results.execution_time)}")
-    print(f"   🌐 Network Time: {format_duration(results.actual_time)}")
-    cache_status = "⚡ CACHE HIT" if results.cache_hit else "🆕 Fresh Execution"
+    print(f"{COLOR_CYAN}{COLOR_BOLD}📊 Resource Usage Summary:{COLOR_RESET}")
+    print(f"   💾 {COLOR_BOLD}Peak Memory:{COLOR_RESET} {COLOR_MAGENTA}{format_bytes(results.peak_memory)}{COLOR_RESET}")
+    print(f"   ⏱️  {COLOR_BOLD}Execution Time:{COLOR_RESET} {COLOR_GREEN}{format_duration(results.execution_time)}{COLOR_RESET}")
+    print(f"   🌐 {COLOR_BOLD}Network Time:{COLOR_RESET} {COLOR_BLUE}{format_duration(results.actual_time)}{COLOR_BLUE}{COLOR_RESET}")
+    cache_status = f"{COLOR_YELLOW}⚡ CACHE HIT{COLOR_RESET}" if results.cache_hit else f"{COLOR_WHITE}🆕 Fresh Execution{COLOR_RESET}"
     print(f"   {cache_status}")
+    if results.cache_speedup is not None:
+        print(
+            f"   {COLOR_CYAN}⚡ Cache Speedup: {COLOR_BOLD}{results.cache_speedup:.2f}x faster{COLOR_RESET}"
+        )
     if results.wall_clock_timeout:
-        print("   ⏰ WALL-CLOCK TIMEOUT (process killed by sandbox)")
+        print(f"   {COLOR_RED}{COLOR_BOLD}⏰ WALL-CLOCK TIMEOUT (process killed by sandbox){COLOR_RESET}")
     if results.output_truncated:
-        print("   ✂️  OUTPUT TRUNCATED (exceeded 10 KB combined output limit)")
+        print(f"   {COLOR_RED}✂️  OUTPUT TRUNCATED (exceeded 10 KB combined output limit){COLOR_RESET}")
     print("=" * 50)
 
 
 def read_code_from_file(file_path: Path) -> str:
-    """Read C++ code from a file.
+    """Read source code from a file.
     
     Args:
-        file_path: Path to the C++ source file.
+        file_path: Path to the source file.
         
     Returns:
         Contents of the file as a string.
@@ -201,11 +228,27 @@ def read_code_from_file(file_path: Path) -> str:
         return f.read()
 
 
-def read_codes_from_directory(directory: Path) -> Dict[str, str]:
-    """Read all C++ code files from a directory.
+def detect_language(file_path: Path) -> str:
+    """Detect execution language from file extension.
     
     Args:
-        directory: Path to the directory containing .cpp files.
+        file_path: Path to the source file.
+        
+    Returns:
+        Language string for the server ("cpp" or "python").
+    """
+    suffix = file_path.suffix.lower()
+    if suffix == ".py":
+        return "python"
+    return "cpp"
+
+
+def read_codes_from_directory(directory: Path, language: str) -> Dict[str, str]:
+    """Read all code files from a directory.
+    
+    Args:
+        directory: Path to the directory containing code files.
+        language: Execution language ("cpp" or "python").
         
     Returns:
         Dictionary mapping file names to their contents.
@@ -216,13 +259,14 @@ def read_codes_from_directory(directory: Path) -> Dict[str, str]:
     codes: Dict[str, str] = {}
     if not directory.exists():
         raise FileNotFoundError(f"Directory not found: {directory}")
-    
-    for file_path in directory.glob("*.cpp"):
+
+    extension = ".py" if language == "python" else ".cpp"
+    for file_path in directory.glob(f"*{extension}"):
         try:
             codes[file_path.stem] = read_code_from_file(file_path)
         except IOError as e:
             print(f"Warning: Could not read {file_path}: {e}")
-    
+
     return codes
 
 
@@ -231,58 +275,68 @@ def execute_single_code(
     name: str,
         code: str,
         stdin_data: str = "",
+        language: str = "cpp",
 ) -> None:
     """Execute a single code example and print results.
     
     Args:
         stub: gRPC stub for the CodeExecutor service.
         name: Name/description of the code example.
-        code: C++ code to execute.
+        code: Code to execute.
         stdin_data: Data to feed to the program's standard input.
+        language: Execution language ("cpp" or "python").
     """
     print(f"\n📝 {name}")
     print("=" * 50)
-    results = execute_code(stub, code, name, stdin_data=stdin_data)
+    results = execute_code(
+        stub, code, name, stdin_data=stdin_data, language=language
+    )
     print_results(results)
 
 
 def execute_codes_from_directory(
     stub: Any,
     directory: Path,
-    repeat_for_cache_demo: bool = False
+    repeat_for_cache_demo: bool = False,
+    language: str = "cpp",
 ) -> None:
     """Execute all code files from a directory.
     
     Args:
         stub: gRPC stub for the CodeExecutor service.
-        directory: Path to the directory containing .cpp files.
+        directory: Path to the directory containing code files.
         repeat_for_cache_demo: Whether to run each file twice to demonstrate caching.
+        language: Execution language ("cpp" or "python").
     """
-    codes = read_codes_from_directory(directory)
-    
+    codes = read_codes_from_directory(directory, language)
+
+    extension = ".py" if language == "python" else ".cpp"
     if not codes:
-        print(f"No .cpp files found in {directory}")
+        print(f"{COLOR_YELLOW}No {extension} files found in {directory}{COLOR_RESET}")
         return
-    
-    print(f"\n📁 Found {len(codes)} code file(s) in {directory}")
+
+    print(f"\n{COLOR_CYAN}📁 Found {len(codes)} code file(s) in {directory}{COLOR_RESET}")
     print("=" * 60)
-    
+
     for name, code in codes.items():
-        print(f"\n🔴 {name} - First Run")
+        print(f"\n{COLOR_WHITE}{COLOR_BOLD}🔴 {name} - First Run{COLOR_RESET}")
         print("-" * 60)
-        results1 = execute_code(stub, code, name)
+        results1 = execute_code(stub, code, name, language=language)
         print_results(results1)
-        
+
         if repeat_for_cache_demo:
             time.sleep(0.5)
-            print(f"\n🟢 {name} - Second Run (Cache Demo)")
+            print(f"\n{COLOR_GREEN}{COLOR_BOLD}🟢 {name} - Second Run (Cache Demo){COLOR_RESET}")
             print("-" * 60)
-            results2 = execute_code(stub, code, name + " - cached")
+            results2 = execute_code(
+                stub, code, name + " - cached", language=language
+            )
             print_results(results2)
-            
-            if results2.cache_hit:
-                speedup = results1.actual_time / max(results2.actual_time, 1)
-                print(f"\n⚡ Cache Speedup: {speedup:.2f}x faster")
+
+            if results2.cache_speedup is not None:
+                print(
+                    f"\n{COLOR_CYAN}⚡ Cache Speedup: {COLOR_BOLD}{results2.cache_speedup:.2f}x faster{COLOR_RESET}"
+                )
 
 
 def create_default_examples_directory(directory: Path) -> None:
@@ -419,7 +473,10 @@ def run_interactive_mode(stub: Any) -> None:
             file_path = input("Enter file path: ").strip()
             try:
                 code = read_code_from_file(Path(file_path))
-                execute_single_code(stub, Path(file_path).stem, code)
+                language = detect_language(Path(file_path))
+                execute_single_code(
+                    stub, Path(file_path).stem, code, language=language
+                )
             except (FileNotFoundError, IOError) as e:
                 print(f"Error: {e}")
         elif choice == "4":
@@ -461,7 +518,7 @@ def main() -> None:
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="DCodeX Python Client - Execute C++ code with resource monitoring"
+        description="DCodeX Python Client - Execute code with resource monitoring"
     )
     parser.add_argument(
         "--server",
@@ -476,12 +533,18 @@ def main() -> None:
     parser.add_argument(
         "--directory", "-d",
         type=Path,
-        help="Directory containing .cpp files to execute"
+        help="Directory containing code files to execute"
     )
     parser.add_argument(
         "--file", "-f",
         type=Path,
-        help="Specific .cpp file to execute"
+        help="Specific code file to execute"
+    )
+    parser.add_argument(
+        "--language", "-l",
+        choices=("cpp", "python"),
+        default=None,
+        help="Override language detection for --file/--directory"
     )
     parser.add_argument(
         "--cache-demo", "-c",
@@ -530,13 +593,23 @@ def main() -> None:
         # Execute specific file
         try:
             code = read_code_from_file(args.file)
-            execute_single_code(stub, args.file.stem, code, stdin_data=stdin_data)
+            language = args.language or detect_language(args.file)
+            execute_single_code(
+                stub,
+                args.file.stem,
+                code,
+                stdin_data=stdin_data,
+                language=language,
+            )
         except (FileNotFoundError, IOError) as e:
             print(f"Error: {e}")
             sys.exit(1)
     elif args.directory:
         # Execute all files from directory
-        execute_codes_from_directory(stub, args.directory, args.cache_demo)
+        language = args.language or "cpp"
+        execute_codes_from_directory(
+            stub, args.directory, args.cache_demo, language=language
+        )
     elif args.interactive:
         # Run interactive mode
         run_interactive_mode(stub)

@@ -89,11 +89,21 @@ python python_client/client.py --directory /path/to/cpp/files
 ```
 Execute all `.cpp` files from a specified directory.
 
+```bash
+python python_client/client.py --directory /path/to/python/files --language python
+```
+Execute all `.py` files from a specified directory.
+
 #### Execute a Specific File
 ```bash
 python python_client/client.py --file /path/to/program.cpp
 ```
 Execute a single C++ file.
+
+```bash
+python python_client/client.py --file /path/to/program.py
+```
+Execute a single Python file (language auto-detected by extension).
 
 #### Interactive Mode
 ```bash
@@ -124,8 +134,9 @@ python python_client/client.py --server localhost:50051
 |--------|-------|-------------|---------|
 | `--server` | | Server address | `localhost:50051` |
 | `--interactive` | `-i` | Run in interactive mode | `False` |
-| `--directory` | `-d` | Directory containing `.cpp` files | `examples/cpp` |
-| `--file` | `-f` | Specific `.cpp` file to execute | None |
+| `--directory` | `-d` | Directory containing code files (use `--language` to pick `.cpp` or `.py`) | `examples/cpp` |
+| `--file` | `-f` | Specific code file to execute | None |
+| `--language` | `-l` | Override language detection for `--file`/`--directory` (`cpp` or `python`) | Auto-detect by extension for `--file`, required for `--directory` with Python |
 | `--cache-demo` | `-c` | Run files twice to show caching | `False` |
 
 ### Examples
@@ -137,8 +148,14 @@ python python_client/client.py --cache-demo
 # Execute all files from a directory
 python python_client/client.py --directory ./my_cpp_programs
 
+# Execute all Python files from a directory
+python python_client/client.py --directory ./my_python_programs --language python
+
 # Execute a single file
 python python_client/client.py --file ./test.cpp
+
+# Execute a single Python file
+python python_client/client.py --file ./test.py
 
 # Interactive mode
 python python_client/client.py --interactive
@@ -215,9 +232,11 @@ python python_client/client.py --directory examples/cpp --cache-demo
 # Run a specific example
 python python_client/client.py --file examples/cpp/01_hello_world.cpp
 
-# Run Python examples directly
-cd examples/python
-python 01_hello_world.py
+# Run a Python example via the server
+python python_client/client.py --file examples/python/01_hello_world.py
+
+# Run all Python examples via the server
+python python_client/client.py --directory examples/python --language python
 
 # Demonstrate the 10 KB output size limit (C++)
 # Expected: ~20 lines of output then truncation notice + ✂️ OUTPUT TRUNCATED flag
