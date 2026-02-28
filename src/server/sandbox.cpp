@@ -19,8 +19,11 @@
 #include <unistd.h>
 
 #include <filesystem>
+#include <sstream>
 
+#include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "src/server/process_runner.h"
@@ -65,18 +68,37 @@ ResourceStats ComputeResourceStats(const struct rusage& usage, absl::Time start,
 ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
                                               absl::string_view stdin_data,
                                               OutputCallback callback) {
+  std::stringstream trace;
+  trace << "--- Backend Execution Trace ---\n";
+
   std::string source_file = TempFileManager::WriteTempFile(".cpp", code);
-  if (source_file.empty()) return {false, "Failed to create source file"};
+  if (source_file.empty()) {
+    trace << "[FAIL] Failed to create source file\n";
+    ExecutionResult res;
+    res.success = false;
+    res.error_message = "Failed to create source file";
+    res.backend_trace = trace.str();
+    return res;
+  }
+  trace << "[OK] Created source file: " << source_file << "\n";
   TempFileManager::Guard source_guard(source_file);
 
   std::string binary_path = source_file + ".bin";
+  trace << "[INFO] Binary target: " << binary_path << "\n";
   TempFileManager::Guard binary_guard(binary_path);
 
   // Use SandboxedProcess helper for command execution
   auto run_cmd = [&](const std::vector<std::string>& argv, absl::string_view input, bool sandboxed,
                      const OutputCallback& cmd_callback) {
+    std::string cmd_str = absl::StrJoin(argv, " ");
+    trace << (sandboxed ? "[SANDBOX] Running: " : "[LOCAL] Running: ") << cmd_str << "\n";
+    LOG(INFO) << (sandboxed ? "Sandboxed" : "Local") << " exec: " << cmd_str;
+
     PipePair stdin_p, stdout_p, stderr_p;
-    if (!stdin_p.Create() || !stdout_p.Create() || !stderr_p.Create()) return ExecutionResult{false, "Pipe creation failed"};
+    if (!stdin_p.Create() || !stdout_p.Create() || !stderr_p.Create()) {
+      trace << "[FAIL] Pipe creation failed\n";
+      return ExecutionResult{false, "Pipe creation failed"};
+    }
 
     absl::Time start = absl::Now();
     pid_t pid = fork();
@@ -86,6 +108,7 @@ ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
 
     stdin_p.CloseRead(); stdout_p.CloseWrite(); stderr_p.CloseWrite();
     if (!input.empty()) {
+      trace << "[INFO] Feeding " << input.size() << " bytes to stdin\n";
       write(stdin_p.WriteFd(), input.data(), input.size());
     }
     stdin_p.CloseWrite();
@@ -114,9 +137,28 @@ ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
     res.wall_clock_timeout = timed_out;
     res.output_truncated = truncated;
     res.success = !truncated && !timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    if (timed_out) res.error_message = "Wall-clock timeout exceeded";
-    else if (truncated) res.error_message = "Output truncated";
-    else if (!res.success) res.error_message = "Process exited with non-zero status";
+    
+    if (timed_out) {
+      res.error_message = "Wall-clock timeout exceeded";
+      trace << "[TIMEOUT] " << res.error_message << "\n";
+    } else if (truncated) {
+      res.error_message = "Output truncated";
+      trace << "[LIMIT] " << res.error_message << "\n";
+    } else if (!res.success) {
+      if (WIFEXITED(status)) {
+        res.error_message = absl::StrCat("Process exited with non-zero status: ", WEXITSTATUS(status));
+      } else if (WIFSIGNALED(status)) {
+        res.error_message = absl::StrCat("Process killed by signal: ", WTERMSIG(status));
+      } else {
+        res.error_message = "Process failed for unknown reasons";
+      }
+      trace << "[ERROR] " << res.error_message << "\n";
+    } else {
+      trace << "[OK] Process finished successfully\n";
+    }
+    
+    trace << "    Resources: CPU time=" << res.stats.user_time_ms + res.stats.system_time_ms 
+          << "ms, Memory=" << res.stats.peak_memory_bytes / 1024 << "KB\n";
     return res;
   };
 
@@ -124,16 +166,20 @@ ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
   auto null_cb = [](absl::string_view, absl::string_view) {};
   ExecutionResult comp_res = run_cmd({"clang++", "-std=c++17", source_file, "-o", binary_path}, "", false, null_cb);
   if (!comp_res.success) {
+    trace << "[FAIL] Compilation failed - capturing detailed errors\n";
     // If compilation fails, we run it again with the real callback to capture output
     ExecutionResult err_res = run_cmd({"clang++", "-std=c++17", source_file, "-o", binary_path}, "", false, callback);
     if (err_res.error_message.empty()) {
       err_res.error_message = "Compilation failed";
     }
+    err_res.backend_trace = trace.str();
     return err_res;
   }
 
   // Run
-  return run_cmd({binary_path}, stdin_data, true, callback);
+  ExecutionResult run_res = run_cmd({binary_path}, stdin_data, true, callback);
+  run_res.backend_trace = trace.str();
+  return run_res;
 }
 
 // --- SandboxedProcess Implementation ---

@@ -196,11 +196,20 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
     state_.SetOutputTruncated(result.output_truncated);
     state_.MarkFinished();
     // If the process failed, stream a stderr chunk so the client sees a
-    // clear human-readable message.
-    if (!result.success && !result.error_message.empty()) {
+    // clear human-readable message and a trace of backend actions.
+    if (!result.success) {
       ExecutionLog error_log;
-      error_log.set_stderr_chunk("ERROR: " + result.error_message + "\n");
-      state_.QueueLog(error_log);
+      std::string error_msg;
+      if (!result.error_message.empty()) {
+        error_msg += "ERROR: " + result.error_message + "\n";
+      }
+      if (!result.backend_trace.empty()) {
+        error_msg += result.backend_trace + "\n";
+      }
+      if (!error_msg.empty()) {
+        error_log.set_stderr_chunk(error_msg);
+        state_.QueueLog(error_log);
+      }
     }
     MaybeWriteNext();
   }

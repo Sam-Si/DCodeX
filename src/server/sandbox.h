@@ -44,6 +44,7 @@ struct ResourceStats {
 struct ExecutionResult {
   bool success = false;
   std::string error_message;
+  std::string backend_trace;
   ResourceStats stats;
   // Indicates if result was served from cache.
   bool cache_hit = false;
@@ -92,7 +93,7 @@ class CppExecutionStrategy : public ExecutionStrategy {
 struct SandboxLimits {
   static constexpr int kCpuTimeLimitSeconds = 1;
   static constexpr int kWallClockTimeoutSeconds = 2;
-  static constexpr size_t kMemoryLimitBytes = 1024 * 1024 * 1024;
+  static constexpr size_t kMemoryLimitBytes = 4ULL * 1024 * 1024 * 1024;
   static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
 };
 
