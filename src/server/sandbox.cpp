@@ -71,8 +71,10 @@ ExecutionResult RunCommandWithSandbox(absl::string_view context,
                                       OutputCallback callback,
                                       std::stringstream& trace) {
   std::string cmd_str = absl::StrJoin(argv, " ");
-  trace << (sandboxed ? "[SANDBOX] " : "[LOCAL] ") << context << ": " << cmd_str
-        << "\n";
+  // Using ANSI colors for backend trace
+  const char* color_tag =
+      sandboxed ? "\033[94m[SANDBOX]\033[0m " : "\033[92m[LOCAL]\033[0m ";
+  trace << color_tag << context << ": " << cmd_str << "\n";
   LOG(INFO) << (sandboxed ? "Sandboxed" : "Local") << " exec: " << cmd_str;
 
   PipePair stdin_p, stdout_p, stderr_p;
@@ -152,21 +154,21 @@ ExecutionResult HandleExecutionResult(absl::string_view context,
                                       std::stringstream& trace) {
   if (res.wall_clock_timeout) {
     res.error_message = "Wall-clock timeout exceeded";
-    trace << "[TIMEOUT] " << context << ": " << res.error_message << "\n";
+    trace << "\033[91m[TIMEOUT]\033[0m " << context << ": " << res.error_message << "\n";
   } else if (res.output_truncated) {
     res.error_message = "Output truncated";
-    trace << "[LIMIT] " << context << ": " << res.error_message << "\n";
+    trace << "\033[93m[LIMIT]\033[0m " << context << ": " << res.error_message << "\n";
   } else if (!res.success) {
     if (res.error_message.empty()) {
       res.error_message = "Process failed";
     }
-    trace << "[ERROR] " << context << ": " << res.error_message << "\n";
+    trace << "\033[91m[ERROR]\033[0m " << context << ": " << res.error_message << "\n";
   } else {
-    trace << "[OK] " << context << " finished successfully\n";
+    trace << "\033[92m[OK]\033[0m " << context << " finished successfully\n";
   }
-  trace << "    Resources: CPU time="
+  trace << "    Resources: \033[1mCPU time\033[0m=\033[92m"
         << res.stats.user_time_ms + res.stats.system_time_ms
-        << "ms, Memory=" << res.stats.peak_memory_bytes / 1024 << "KB\n";
+        << "ms\033[0m, \033[1mMemory\033[0m=\033[95m" << res.stats.peak_memory_bytes / 1024 << "KB\033[0m\n";
   res.backend_trace = trace.str();
   return res;
 }

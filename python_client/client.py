@@ -26,6 +26,17 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List
 
 import grpc
 
+# ANSI Color Codes
+COLOR_RESET = "\033[0m"
+COLOR_BOLD = "\033[1m"
+COLOR_RED = "\033[91m"
+COLOR_GREEN = "\033[92m"
+COLOR_YELLOW = "\033[93m"
+COLOR_BLUE = "\033[94m"
+COLOR_MAGENTA = "\033[95m"
+COLOR_CYAN = "\033[96m"
+COLOR_WHITE = "\033[97m"
+
 # Add the current directory to sys.path to find generated modules
 sys.path.append(os.path.join(os.path.dirname(__file__), "."))
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -129,7 +140,7 @@ def execute_code(
             print(response.stdout_chunk, end='', flush=True)
         if response.stderr_chunk:
             stderr_output.append(response.stderr_chunk)
-            print(f"STDERR: {response.stderr_chunk}", end='', flush=True)
+            print(f"{COLOR_RED}STDERR: {response.stderr_chunk}{COLOR_RESET}", end='', flush=True)
         if response.peak_memory_bytes > 0:
             peak_memory = response.peak_memory_bytes
         if response.execution_time_ms > 0:
@@ -168,23 +179,23 @@ def print_results(results: ExecutionResult, show_output: bool = False) -> None:
             # If stdout existed and didn't end with a newline, add one before STDERR
             if results.stdout and not results.stdout.endswith('\n'):
                 print()
-            print(f"STDERR: {results.stderr}", end='')
+            print(f"{COLOR_RED}STDERR: {results.stderr}{COLOR_RESET}", end='')
 
         if not results.stdout and not results.stderr and results.execution_time > 0:
             # Execution finished but produced no output - might be a silent crash or infrastructure error
             pass
     
     print("-" * 50)
-    print("📊 Resource Usage Summary:")
-    print(f"   💾 Peak Memory: {format_bytes(results.peak_memory)}")
-    print(f"   ⏱️  Execution Time: {format_duration(results.execution_time)}")
-    print(f"   🌐 Network Time: {format_duration(results.actual_time)}")
-    cache_status = "⚡ CACHE HIT" if results.cache_hit else "🆕 Fresh Execution"
+    print(f"{COLOR_CYAN}{COLOR_BOLD}📊 Resource Usage Summary:{COLOR_RESET}")
+    print(f"   💾 {COLOR_BOLD}Peak Memory:{COLOR_RESET} {COLOR_MAGENTA}{format_bytes(results.peak_memory)}{COLOR_RESET}")
+    print(f"   ⏱️  {COLOR_BOLD}Execution Time:{COLOR_RESET} {COLOR_GREEN}{format_duration(results.execution_time)}{COLOR_RESET}")
+    print(f"   🌐 {COLOR_BOLD}Network Time:{COLOR_RESET} {COLOR_BLUE}{format_duration(results.actual_time)}{COLOR_BLUE}{COLOR_RESET}")
+    cache_status = f"{COLOR_YELLOW}⚡ CACHE HIT{COLOR_RESET}" if results.cache_hit else f"{COLOR_WHITE}🆕 Fresh Execution{COLOR_RESET}"
     print(f"   {cache_status}")
     if results.wall_clock_timeout:
-        print("   ⏰ WALL-CLOCK TIMEOUT (process killed by sandbox)")
+        print(f"   {COLOR_RED}{COLOR_BOLD}⏰ WALL-CLOCK TIMEOUT (process killed by sandbox){COLOR_RESET}")
     if results.output_truncated:
-        print("   ✂️  OUTPUT TRUNCATED (exceeded 10 KB combined output limit)")
+        print(f"   {COLOR_RED}✂️  OUTPUT TRUNCATED (exceeded 10 KB combined output limit){COLOR_RESET}")
     print("=" * 50)
 
 
@@ -289,21 +300,21 @@ def execute_codes_from_directory(
 
     extension = ".py" if language == "python" else ".cpp"
     if not codes:
-        print(f"No {extension} files found in {directory}")
+        print(f"{COLOR_YELLOW}No {extension} files found in {directory}{COLOR_RESET}")
         return
 
-    print(f"\n📁 Found {len(codes)} code file(s) in {directory}")
+    print(f"\n{COLOR_CYAN}📁 Found {len(codes)} code file(s) in {directory}{COLOR_RESET}")
     print("=" * 60)
 
     for name, code in codes.items():
-        print(f"\n🔴 {name} - First Run")
+        print(f"\n{COLOR_WHITE}{COLOR_BOLD}🔴 {name} - First Run{COLOR_RESET}")
         print("-" * 60)
         results1 = execute_code(stub, code, name, language=language)
         print_results(results1)
 
         if repeat_for_cache_demo:
             time.sleep(0.5)
-            print(f"\n🟢 {name} - Second Run (Cache Demo)")
+            print(f"\n{COLOR_GREEN}{COLOR_BOLD}🟢 {name} - Second Run (Cache Demo){COLOR_RESET}")
             print("-" * 60)
             results2 = execute_code(
                 stub, code, name + " - cached", language=language
@@ -312,7 +323,7 @@ def execute_codes_from_directory(
 
             if results2.cache_hit:
                 speedup = results1.actual_time / max(results2.actual_time, 1)
-                print(f"\n⚡ Cache Speedup: {speedup:.2f}x faster")
+                print(f"\n{COLOR_CYAN}⚡ Cache Speedup: {COLOR_BOLD}{speedup:.2f}x faster{COLOR_RESET}")
 
 
 def create_default_examples_directory(directory: Path) -> None:
