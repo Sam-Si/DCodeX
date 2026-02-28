@@ -26,7 +26,32 @@
 
 ---
 
-## 🏗️ Architecture
+## ⚙️ Server Options
+
+The DCodeX server can be configured using Abseil flags.
+
+### Resource Limit Flags
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--port` | Server port for the gRPC service | `50051` |
+| `--max_concurrent_sandboxes` | Maximum number of concurrent sandboxes allowed | `10` |
+| `--sandbox_cpu_time_limit_seconds` | CPU time limit in seconds for sandboxed execution | `1` |
+| `--sandbox_wall_clock_timeout_seconds` | Wall-clock timeout in seconds for sandboxed execution | `2` |
+| `--sandbox_memory_limit_bytes` | Memory limit in bytes for sandboxed execution | `4 GB` |
+| `--sandbox_max_output_bytes` | Maximum combined stdout+stderr output in bytes | `10 KB` |
+
+### Examples
+
+```bash
+# Run server on a custom port with increased memory limit
+bazel run //src/server:server -- --port 9090 --sandbox_memory_limit_bytes 8589934592
+
+# Run server with strict output limits and longer wall-clock timeout
+bazel run //src/server:server -- --sandbox_max_output_bytes 5120 --sandbox_wall_clock_timeout_seconds 10
+```
+
+---
 
 DCodeX consists of two main components:
 
@@ -246,6 +271,27 @@ python python_client/client.py --file examples/cpp/14_output_flood.cpp
 python python_client/client.py --file examples/python/09_output_flood.py
 ```
 
+#### Resource Limit Demonstrations
+
+You can change the server's resource limits to see how it affects the execution of specific examples.
+
+```bash
+# 1. Demonstrate CPU time limit (11_infinite_loop.cpp)
+# Increase the CPU limit to 3 seconds.
+bazel run //src/server:server -- --sandbox_cpu_time_limit_seconds 3
+python python_client/client.py --file examples/cpp/11_infinite_loop.cpp
+
+# 2. Demonstrate Memory limit (12_memory_exhaustion.cpp)
+# Set a strict 50 MB memory limit to see it fail quickly.
+bazel run //src/server:server -- --sandbox_memory_limit_bytes 52428800
+python python_client/client.py --file examples/cpp/12_memory_exhaustion.cpp
+
+# 3. Demonstrate Output limit (14_output_flood.cpp)
+# Increase the output limit to 50 KB.
+bazel run //src/server:server -- --sandbox_max_output_bytes 51200
+python python_client/client.py --file examples/cpp/14_output_flood.cpp
+```
+
 ---
 
 ## 📊 Resource Monitoring
@@ -312,11 +358,10 @@ timeout measures actual elapsed real time, so it catches:
 
 ### Configuration
 
-The timeout is controlled by the constant `kWallClockTimeoutSeconds` in `src/server/sandbox.cpp`:
+The timeout is controlled by the Abseil flag `--sandbox_wall_clock_timeout_seconds` (default: **2 seconds**):
 
-```cpp
-// Wall-clock timeout in seconds for sandboxed execution.
-constexpr int kWallClockTimeoutSeconds = 5;
+```bash
+bazel run //src/server:server -- --sandbox_wall_clock_timeout_seconds 5
 ```
 
 ### Client Output
@@ -371,13 +416,10 @@ whether the wall-clock timeout has fired yet.
 
 ### Configuration
 
-The limit is controlled by the constant `kMaxOutputBytes` in `src/server/sandbox.h`:
+The limit is controlled by the Abseil flag `--sandbox_max_output_bytes` (default: **10 KB**):
 
-```cpp
-// Maximum combined stdout+stderr output in bytes before the process is
-// killed and the output is truncated.  10 KB is small enough for demos
-// while still protecting against runaway printers.
-static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
+```bash
+bazel run //src/server:server -- --sandbox_max_output_bytes 102400
 ```
 
 ### Client Output

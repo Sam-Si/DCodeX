@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <sstream>
 
+#include "absl/flags/flag.h"
 #include "absl/log/log.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
@@ -32,10 +33,16 @@
 
 namespace dcodex {
 
-namespace {
+ABSL_FLAG(int, sandbox_cpu_time_limit_seconds, 1,
+          "CPU time limit in seconds for sandboxed execution");
+ABSL_FLAG(int, sandbox_wall_clock_timeout_seconds, 2,
+          "Wall-clock timeout in seconds for sandboxed execution");
+ABSL_FLAG(uint64_t, sandbox_memory_limit_bytes, 4ULL * 1024 * 1024 * 1024,
+          "Memory limit in bytes for sandboxed execution");
+ABSL_FLAG(uint64_t, sandbox_max_output_bytes, 10 * 1024,
+          "Maximum combined stdout+stderr output in bytes");
 
-// --- SRP: Resource Monitoring Constants ---
-constexpr int kWallClockTimeoutSeconds = SandboxLimits::kWallClockTimeoutSeconds;
+namespace {
 
 using internal::ProcessRunner;
 using internal::TempFileManager;
@@ -106,7 +113,7 @@ ExecutionResult RunCommandWithSandbox(absl::string_view context,
     watcher_pid = fork();
     if (watcher_pid == 0) {
       for (int fd = 0; fd < 1024; ++fd) close(fd);
-      sleep(kWallClockTimeoutSeconds);
+      sleep(absl::GetFlag(FLAGS_sandbox_wall_clock_timeout_seconds));
       if (kill(pid, 0) == 0) kill(pid, SIGKILL);
       _exit(0);
     }

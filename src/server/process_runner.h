@@ -25,6 +25,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "absl/flags/flag.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -73,11 +74,13 @@ class PipePair {
 class ProcessRunner {
  public:
   static void ApplyResourceLimits() {
-    struct rlimit cpu_limit{SandboxLimits::kCpuTimeLimitSeconds,
-                            SandboxLimits::kCpuTimeLimitSeconds};
+    int cpu_limit_secs = absl::GetFlag(FLAGS_sandbox_cpu_time_limit_seconds);
+    struct rlimit cpu_limit{static_cast<rlim_t>(cpu_limit_secs),
+                            static_cast<rlim_t>(cpu_limit_secs)};
     setrlimit(RLIMIT_CPU, &cpu_limit);
-    struct rlimit mem_limit{SandboxLimits::kMemoryLimitBytes,
-                            SandboxLimits::kMemoryLimitBytes};
+    uint64_t mem_limit_bytes = absl::GetFlag(FLAGS_sandbox_memory_limit_bytes);
+    struct rlimit mem_limit{static_cast<rlim_t>(mem_limit_bytes),
+                            static_cast<rlim_t>(mem_limit_bytes)};
     setrlimit(RLIMIT_AS, &mem_limit);
   }
 
@@ -138,11 +141,12 @@ class ProcessRunner {
       read_from(stdout_fd, true, stdout_open);
       read_from(stderr_fd, false, stderr_open);
 
-      if (total_bytes >= SandboxLimits::kMaxOutputBytes) {
+      uint64_t max_output_bytes = absl::GetFlag(FLAGS_sandbox_max_output_bytes);
+      if (total_bytes >= max_output_bytes) {
         kill(child_pid, SIGKILL);
         truncated = true;
         callback("", absl::StrFormat("\n[Output truncated: exceeded %zu KB limit]\n",
-                                    SandboxLimits::kMaxOutputBytes / 1024));
+                                    max_output_bytes / 1024));
         break;
       }
     }

@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/flags/declare.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -104,13 +105,11 @@ class PythonExecutionStrategy : public ExecutionStrategy {
   absl::string_view GetStrategyId() const override { return "python"; }
 };
 
-// Centralized configuration for sandboxed resource limits.
-struct SandboxLimits {
-  static constexpr int kCpuTimeLimitSeconds = 1;
-  static constexpr int kWallClockTimeoutSeconds = 2;
-  static constexpr size_t kMemoryLimitBytes = 4ULL * 1024 * 1024 * 1024;
-  static constexpr size_t kMaxOutputBytes = 10 * 1024;  // 10 KB
-};
+// Abseil Flags for sandboxed resource limits.
+ABSL_DECLARE_FLAG(int, sandbox_cpu_time_limit_seconds);
+ABSL_DECLARE_FLAG(int, sandbox_wall_clock_timeout_seconds);
+ABSL_DECLARE_FLAG(uint64_t, sandbox_memory_limit_bytes);
+ABSL_DECLARE_FLAG(uint64_t, sandbox_max_output_bytes);
 
 // Orchestrator class that manages sandboxed execution and caching.
 class SandboxedProcess {
