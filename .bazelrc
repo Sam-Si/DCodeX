@@ -64,6 +64,13 @@ build:docker --action_env=PATH
 build:docker --strip=never
 build:docker --nowatchfs
 
+# 4. ULTRA LINKER & MEMORY (New Additions)
+build:docker --linkopt=-fuse-ld=lld
+build:docker --linkopt=-Wl,--threads
+build:docker --experimental_oom_more_eagerly_threshold=90
+build:docker --experimental_remote_cache_compression=true
+build:docker --cc_output_directory_tag=docker
+
 # ============================================================
 # 6. MACOS NATIVE CONFIG (--config=macos)
 # ============================================================
