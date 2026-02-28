@@ -57,6 +57,7 @@ class ExecutionResult:
     execution_time: float
     cache_hit: bool
     actual_time: float
+    cache_speedup: float | None = None
     wall_clock_timeout: bool = False
     output_truncated: bool = False
 
@@ -131,6 +132,7 @@ def execute_code(
     cache_hit = False
     wall_clock_timeout = False
     output_truncated = False
+    cached_execution_time = 0.0
     stdout_output: List[str] = []
     stderr_output: List[str] = []
     
@@ -146,12 +148,17 @@ def execute_code(
         if response.execution_time_ms > 0:
             execution_time = response.execution_time_ms
         cache_hit = response.cache_hit
+        if response.cache_hit and response.execution_time_ms > 0:
+            cached_execution_time = response.execution_time_ms
         if response.wall_clock_timeout:
             wall_clock_timeout = True
         if response.output_truncated:
             output_truncated = True
     
     actual_time = (time.time() - start_time) * 1000  # Convert to ms
+    cache_speedup = None
+    if cache_hit and cached_execution_time > 0:
+        cache_speedup = max(actual_time, 1) / max(cached_execution_time, 1)
     
     return ExecutionResult(
         stdout=''.join(stdout_output),
@@ -160,6 +167,7 @@ def execute_code(
         execution_time=execution_time,
         cache_hit=cache_hit,
         actual_time=actual_time,
+        cache_speedup=cache_speedup,
         wall_clock_timeout=wall_clock_timeout,
         output_truncated=output_truncated,
     )
@@ -192,6 +200,10 @@ def print_results(results: ExecutionResult, show_output: bool = False) -> None:
     print(f"   🌐 {COLOR_BOLD}Network Time:{COLOR_RESET} {COLOR_BLUE}{format_duration(results.actual_time)}{COLOR_BLUE}{COLOR_RESET}")
     cache_status = f"{COLOR_YELLOW}⚡ CACHE HIT{COLOR_RESET}" if results.cache_hit else f"{COLOR_WHITE}🆕 Fresh Execution{COLOR_RESET}"
     print(f"   {cache_status}")
+    if results.cache_speedup is not None:
+        print(
+            f"   {COLOR_CYAN}⚡ Cache Speedup: {COLOR_BOLD}{results.cache_speedup:.2f}x faster{COLOR_RESET}"
+        )
     if results.wall_clock_timeout:
         print(f"   {COLOR_RED}{COLOR_BOLD}⏰ WALL-CLOCK TIMEOUT (process killed by sandbox){COLOR_RESET}")
     if results.output_truncated:
@@ -321,9 +333,10 @@ def execute_codes_from_directory(
             )
             print_results(results2)
 
-            if results2.cache_hit:
-                speedup = results1.actual_time / max(results2.actual_time, 1)
-                print(f"\n{COLOR_CYAN}⚡ Cache Speedup: {COLOR_BOLD}{speedup:.2f}x faster{COLOR_RESET}")
+            if results2.cache_speedup is not None:
+                print(
+                    f"\n{COLOR_CYAN}⚡ Cache Speedup: {COLOR_BOLD}{results2.cache_speedup:.2f}x faster{COLOR_RESET}"
+                )
 
 
 def create_default_examples_directory(directory: Path) -> None:
