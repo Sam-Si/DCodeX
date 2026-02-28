@@ -43,6 +43,9 @@ bazel run //src/server:server -- --sandbox_cpu_time_limit_seconds 3 --sandbox_me
 ## Python Client
 
 ```bash
+# Execute all C examples
+python python_client/client.py --directory examples/c
+
 # Execute all C++ examples
 python python_client/client.py --directory examples/cpp
 
@@ -50,11 +53,12 @@ python python_client/client.py --directory examples/cpp
 python python_client/client.py --directory examples/python
 
 # Execute a single file (language auto-detected from extension)
+python python_client/client.py --file examples/c/01_hello_world.c
 python python_client/client.py --file examples/cpp/01_hello_world.cpp
 python python_client/client.py --file examples/python/01_hello_world.py
 
 # Run each file twice to demonstrate caching
-python python_client/client.py --directory examples/cpp --cache-demo
+python python_client/client.py --directory examples/c --cache-demo
 
 # Interactive mode
 python python_client/client.py --interactive
@@ -82,6 +86,17 @@ python python_client/client.py --file examples/cpp/13_stdin_input.cpp --stdin-fi
 | `--stdin-file` | | None | File to read stdin from |
 
 ## Examples
+
+### C (`examples/c/`)
+
+| File                  | Description                  |
+|-----------------------|------------------------------|
+| `01_hello_world.c`    | Basic I/O                    |
+| `02_basic_math.c`     | Math operations              |
+| `03_pointers.c`       | Pointer arithmetic and swap  |
+| `04_structs.c`        | Struct definitions and usage |
+| `05_file_io.c`        | File read/write operations   |
+| `06_dynamic_memory.c` | malloc/calloc/realloc/free   |
 
 ### C++ (`examples/cpp/`)
 
@@ -120,11 +135,115 @@ python python_client/client.py --file examples/cpp/13_stdin_input.cpp --stdin-fi
 
 - **Secure Sandboxing**: Linux `rlimit` enforces CPU/memory constraints
 - **Wall-Clock Timeout**: Catches sleeping/blocked processes that CPU limits miss
+- **gRPC Alarm-Based Timeout**: Efficient timeout handling without fork overhead
 - **Output Limiting**: Hard cap on stdout+stderr (default 10KB) prevents flooding
 - **Stdin Support**: Pass input data via `--stdin` or `--stdin-file`
 - **Real-time Streaming**: gRPC bidirectional streaming for live output
 - **Smart Caching**: `absl::Hash`-based LRU cache with 1-hour TTL
-- **Language Auto-Detection**: Detected from file extension (`.cpp`, `.py`) or directory name
+- **Multi-Language Support**: C, C++, and Python with auto-detection from file extension
+
+## Architecture: gRPC Alarm for Process Timeout
+
+The sandbox uses **gRPC Alarm** for efficient process timeout handling instead of the traditional fork-based watcher
+process approach.
+
+### Before: Fork-Based Watcher (DEPRECATED)
+
+```cpp
+// Old approach - creates an extra process for each timeout
+pid_t watcher_pid = fork();
+if (watcher_pid == 0) {
+    for (int fd = 0; fd < 1024; ++fd) close(fd);
+    sleep(timeout_seconds);
+    if (kill(pid, 0) == 0) kill(pid, SIGKILL);
+    _exit(0);
+}
+```
+
+**Problems with fork-based approach:**
+
+- Creates an extra process for each timeout (process table pollution)
+- Duplicates parent's address space (memory overhead)
+- Requires complex cleanup (zombie process handling)
+- Not integrated with gRPC server lifecycle
+- Race conditions between watcher and main process
+
+### After: gRPC Alarm-Based Timeout
+
+```cpp
+// New approach - uses gRPC Alarm for efficient timeout
+auto timeout_manager = std::make_unique<ProcessTimeoutManager>(
+    pid, timeout, [&timed_out_flag, pid]() {
+      timed_out_flag.store(true);
+      if (kill(pid, 0) == 0) kill(pid, SIGKILL);
+    });
+timeout_manager->Start();
+```
+
+**Benefits of gRPC Alarm approach:**
+
+| Aspect           | Fork-Based              | gRPC Alarm        |
+|------------------|-------------------------|-------------------|
+| Extra processes  | 1 per timeout           | 0                 |
+| Memory overhead  | Full address space copy | Minimal           |
+| Zombie handling  | Required                | Not needed        |
+| gRPC integration | None                    | Native            |
+| Cancellation     | Complex                 | Simple `Cancel()` |
+| Thread safety    | Manual                  | `absl::Mutex`     |
+
+### Demo: Comparing Approaches
+
+To demonstrate the benefits:
+
+```bash
+# Terminal 1: Monitor process count
+watch -n 0.5 'ps -e | wc -l'
+
+# Terminal 2: Start server
+bazel run //src/server:server
+
+# Terminal 3: Send concurrent requests with timeouts
+for i in {1..50}; do
+  python python_client/client.py --file examples/python/06_infinite_loop.py &
+done
+```
+
+**Expected Results:**
+
+- **Old approach**: Process count increases by 2x (main + watcher for each request)
+- **New approach**: Process count increases by 1x (only the sandboxed process)
+
+### Execution Pipeline Architecture
+
+The code execution follows a **Command Pattern** (GoF) with discrete execution steps:
+
+```
+ExecutionContext
+       │
+       ▼
+┌─────────────────────┐
+│ CreateSourceFileStep│  Creates temp file with code
+└─────────────────────┘
+       │
+       ▼
+┌─────────────────────┐
+│    CompileStep      │  Compiles source (C++ only)
+└─────────────────────┘
+       │
+       ▼
+┌─────────────────────┐
+│   RunProcessStep    │  Executes with sandboxing
+│   + gRPC Alarm      │  Timeout management
+└─────────────────────┘
+       │
+       ▼
+┌─────────────────────┐
+│ FinalizeResultStep  │  Formats result and trace
+└─────────────────────┘
+       │
+       ▼
+  ExecutionResult
+```
 
 ## Project Structure
 
@@ -136,6 +255,7 @@ DCodeX/
 │   └── execution_cache.cpp/h  # LRU cache
 ├── proto/sandbox.proto   # gRPC protocol
 ├── python_client/client.py    # Python client
+├── examples/c/           # C examples
 ├── examples/cpp/         # C++ examples
 └── examples/python/      # Python examples
 ```

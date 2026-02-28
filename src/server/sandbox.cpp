@@ -73,6 +73,11 @@ ResourceStats ComputeResourceStats(const struct rusage& usage,
   return stats;
 }
 
+// -----------------------------------------------------------------------------
+// SRP: Process Execution Helper
+// Handles low-level process execution with sandboxing support.
+// Now uses gRPC Alarm for timeout instead of fork-based watcher.
+// -----------------------------------------------------------------------------
 ExecutionResult RunCommandWithSandbox(absl::string_view context,
                                       const std::vector<std::string>& argv,
                                       absl::string_view input, bool sandboxed,
@@ -108,29 +113,40 @@ ExecutionResult RunCommandWithSandbox(absl::string_view context,
   }
   stdin_p.CloseWrite();
 
-  pid_t watcher_pid = -1;
+  // Use gRPC Alarm-based timeout manager instead of fork-based watcher
+  std::atomic<bool> timed_out_flag{false};
+  std::unique_ptr<ProcessTimeoutManager> timeout_manager;
+  
   if (sandboxed) {
-    watcher_pid = fork();
-    if (watcher_pid == 0) {
-      for (int fd = 0; fd < 1024; ++fd) close(fd);
-      sleep(absl::GetFlag(FLAGS_sandbox_wall_clock_timeout_seconds));
-      if (kill(pid, 0) == 0) kill(pid, SIGKILL);
-      _exit(0);
-    }
+    absl::Duration timeout = absl::Seconds(
+        absl::GetFlag(FLAGS_sandbox_wall_clock_timeout_seconds));
+    timeout_manager = std::make_unique<ProcessTimeoutManager>(
+        pid, timeout, [&timed_out_flag, pid]() {
+          timed_out_flag.store(true);
+          // Kill the process if still running
+          if (kill(pid, 0) == 0) {
+            kill(pid, SIGKILL);
+          }
+        });
+    timeout_manager->Start();
+    trace << "[INFO] gRPC Alarm timeout armed for " 
+          << absl::ToInt64Seconds(timeout) << " seconds\n";
   }
 
   bool truncated = false;
   ProcessRunner::ReadOutput(stdout_p.ReadFd(), stderr_p.ReadFd(), pid, callback,
                             truncated);
 
+  // Cancel timeout if process finished before alarm
+  if (timeout_manager) {
+    timeout_manager->Cancel();
+  }
+
   int status = 0;
   struct rusage usage {};
-  bool timed_out = false;
-  if (sandboxed && watcher_pid > 0) {
-    timed_out = ProcessRunner::WaitWithTimeout(pid, watcher_pid, status, usage);
-  } else {
-    wait4(pid, &status, 0, &usage);
-  }
+  wait4(pid, &status, 0, &usage);
+
+  bool timed_out = timed_out_flag.load();
 
   ExecutionResult res;
   res.stats = ComputeResourceStats(usage, start, absl::Now());
@@ -183,87 +199,211 @@ ExecutionResult HandleExecutionResult(absl::string_view context,
 
 }  // namespace
 
-ExecutionResult CppExecutionStrategy::Execute(absl::string_view code,
-                                              absl::string_view stdin_data,
-                                              OutputCallback callback) {
-  std::stringstream trace;
-  trace << "--- Backend Execution Trace ---\n";
+// -----------------------------------------------------------------------------
+// ProcessTimeoutManager Implementation
+// -----------------------------------------------------------------------------
 
-  std::string source_file = TempFileManager::WriteTempFile(".cpp", code);
-  if (source_file.empty()) {
-    trace << "[FAIL] Failed to create source file\n";
-    ExecutionResult res;
-    res.success = false;
-    res.error_message = "Failed to create source file";
-    res.backend_trace = trace.str();
-    return res;
+ProcessTimeoutManager::ProcessTimeoutManager(pid_t pid, absl::Duration timeout,
+                                             TimeoutCallback callback)
+    : pid_(pid), timeout_(timeout), callback_(std::move(callback)) {}
+
+ProcessTimeoutManager::~ProcessTimeoutManager() { Cancel(); }
+
+void ProcessTimeoutManager::Start() {
+  absl::MutexLock lock(&mutex_);
+  if (started_ || cancelled_) {
+    return;
   }
-  trace << "[OK] Created source file: " << source_file << "\n";
-  TempFileManager::Guard source_guard(source_file);
+  started_ = true;
 
-  std::string binary_path = source_file + ".bin";
-  trace << "[INFO] Binary target: " << binary_path << "\n";
-  TempFileManager::Guard binary_guard(binary_path);
+  // Calculate deadline from current time
+  auto deadline = absl::ToChronoTime(absl::Now() + timeout_);
+  
+  // Set the gRPC Alarm with a callback
+  alarm_.Set(deadline, [this](bool ok) { OnAlarmTriggered(ok); });
+}
 
-  // Compile
+void ProcessTimeoutManager::Cancel() {
+  absl::MutexLock lock(&mutex_);
+  if (cancelled_ || triggered_) {
+    return;
+  }
+  cancelled_ = true;
+  alarm_.Cancel();
+}
+
+bool ProcessTimeoutManager::IsTriggered() const {
+  absl::MutexLock lock(&mutex_);
+  return triggered_;
+}
+
+bool ProcessTimeoutManager::IsCancelled() const {
+  absl::MutexLock lock(&mutex_);
+  return cancelled_;
+}
+
+void ProcessTimeoutManager::OnAlarmTriggered(bool ok) {
+  absl::MutexLock lock(&mutex_);
+  if (cancelled_) {
+    return;
+  }
+  
+  if (ok) {
+    // Alarm fired (timeout occurred)
+    triggered_ = true;
+    if (callback_) {
+      callback_();
+    }
+  }
+  // If !ok, the alarm was cancelled
+}
+
+// -----------------------------------------------------------------------------
+// Concrete Execution Steps Implementation
+// -----------------------------------------------------------------------------
+
+bool CreateSourceFileStep::Execute(ExecutionContext& context) {
+  context.source_file_path = TempFileManager::WriteTempFile(extension_, context.code);
+  if (context.source_file_path.empty()) {
+    context.trace << "[FAIL] Failed to create source file\n";
+    context.Fail("Failed to create source file");
+    return false;
+  }
+  context.trace << "[OK] Created source file: " << context.source_file_path << "\n";
+  context.AddCleanupPath(context.source_file_path);
+  return true;
+}
+
+bool CompileStep::Execute(ExecutionContext& context) {
+  // Build the compile command
+  std::vector<std::string> argv = {compiler_};
+  for (const auto& flag : compiler_flags_) {
+    argv.push_back(flag);
+  }
+  argv.push_back(context.source_file_path);
+  context.binary_path = context.source_file_path + ".bin";
+  argv.push_back("-o");
+  argv.push_back(context.binary_path);
+  
+  context.trace << "[INFO] Compiler: " << compiler_ << "\n";
+  context.trace << "[INFO] Binary target: " << context.binary_path << "\n";
+  context.AddCleanupPath(context.binary_path);
+
+  // First compile attempt (null callback to suppress output)
   auto null_cb = [](absl::string_view, absl::string_view) {};
   ExecutionResult comp_res = RunCommandWithSandbox(
-      "Compile", {"clang++", "-std=c++17", source_file, "-o", binary_path},
-      "", false, null_cb, trace);
-  comp_res = HandleExecutionResult("Compile", comp_res, trace);
+      "Compile", argv, "", false, null_cb, context.trace);
+  comp_res = HandleExecutionResult("Compile", comp_res, context.trace);
+
   if (!comp_res.success) {
-    trace << "[FAIL] Compilation failed - capturing detailed errors\n";
-    // If compilation fails, we run it again with the real callback to capture
-    // output
+    context.trace << "[FAIL] Compilation failed - capturing detailed errors\n";
+    // Re-run with actual callback to capture error output
     ExecutionResult err_res = RunCommandWithSandbox(
-        "Compile", {"clang++", "-std=c++17", source_file, "-o", binary_path},
-        "", false, callback, trace);
-    err_res = HandleExecutionResult("Compile", err_res, trace);
+        "Compile", argv, "", false, context.callback, context.trace);
+    err_res = HandleExecutionResult("Compile", err_res, context.trace);
     if (err_res.error_message.empty()) {
       err_res.error_message = "Compilation failed";
     }
-    err_res.backend_trace = trace.str();
-    return err_res;
+    context.result = err_res;
+    return false;
   }
 
-  // Run
-  ExecutionResult run_res = RunCommandWithSandbox(
-      "Run", {binary_path}, stdin_data, true, callback, trace);
-  return HandleExecutionResult("Run", run_res, trace);
+  context.result = comp_res;
+  return true;
 }
 
-// --- PythonExecutionStrategy Implementation ---
+bool RunProcessStep::Execute(ExecutionContext& context) {
+  std::vector<std::string> argv;
+  
+  // Determine what to run based on binary_path
+  if (!context.binary_path.empty()) {
+    // Compiled language: run the binary
+    argv = {context.binary_path};
+  } else {
+    // Interpreted language: run with interpreter
+    // Detect language from source file extension
+    if (context.source_file_path.ends_with(".py")) {
+      argv = {"python", "-u", context.source_file_path};
+    } else {
+      // Default: try to execute directly
+      argv = {context.source_file_path};
+    }
+  }
+
+  ExecutionResult run_res = RunCommandWithSandbox(
+      "Run", argv, context.stdin_data, sandboxed_, context.callback, context.trace);
+  context.result = HandleExecutionResult("Run", run_res, context.trace);
+  return context.result.success;
+}
+
+bool FinalizeResultStep::Execute(ExecutionContext& context) {
+  // Ensure trace is captured in result
+  context.result.backend_trace = context.trace.str();
+  return context.result.success;
+}
+
+// -----------------------------------------------------------------------------
+// CompiledLanguageStrategy Implementation
+// Supports both C and C++ compilation with appropriate compiler selection.
+// -----------------------------------------------------------------------------
+ExecutionResult CompiledLanguageStrategy::Execute(absl::string_view code,
+                                                  absl::string_view stdin_data,
+                                                  OutputCallback callback) {
+  ExecutionContext context(code, stdin_data, std::move(callback));
+  
+  auto pipeline = CreatePipeline();
+  return pipeline->Run(context);
+}
+
+std::unique_ptr<ExecutionPipeline> CompiledLanguageStrategy::CreatePipeline() {
+  auto pipeline = std::make_unique<ExecutionPipeline>();
+  pipeline->AddStep(std::make_unique<CreateSourceFileStep>(GetExtension()))
+           .AddStep(std::make_unique<CompileStep>(GetCompiler(), GetStandardFlags()))
+           .AddStep(std::make_unique<RunProcessStep>(true))
+           .AddStep(std::make_unique<FinalizeResultStep>(
+               language_ == Language::kC ? "CExecution" : "CppExecution"));
+  return pipeline;
+}
+
+// -----------------------------------------------------------------------------
+// PythonExecutionStrategy Implementation
+// -----------------------------------------------------------------------------
 ExecutionResult PythonExecutionStrategy::Execute(absl::string_view code,
                                                  absl::string_view stdin_data,
                                                  OutputCallback callback) {
-  std::stringstream trace;
-  trace << "--- Backend Execution Trace ---\n";
+  ExecutionContext context(code, stdin_data, std::move(callback));
+  
+  auto pipeline = CreatePipeline();
+  return pipeline->Run(context);
+}
 
-  std::string source_file = TempFileManager::WriteTempFile(".py", code);
-  if (source_file.empty()) {
-    trace << "[FAIL] Failed to create source file\n";
-    ExecutionResult res;
-    res.success = false;
-    res.error_message = "Failed to create source file";
-    res.backend_trace = trace.str();
-    return res;
-  }
-  trace << "[OK] Created source file: " << source_file << "\n";
-  TempFileManager::Guard source_guard(source_file);
-
-  ExecutionResult run_res = RunCommandWithSandbox(
-      "Run", {"python", "-u", source_file}, stdin_data, true, callback, trace);
-  return HandleExecutionResult("Run", run_res, trace);
+std::unique_ptr<ExecutionPipeline> PythonExecutionStrategy::CreatePipeline() {
+  auto pipeline = std::make_unique<ExecutionPipeline>();
+  pipeline->AddStep(std::make_unique<CreateSourceFileStep>(".py"))
+           .AddStep(std::make_unique<RunProcessStep>(true))
+           .AddStep(std::make_unique<FinalizeResultStep>("PythonExecution"));
+  return pipeline;
 }
 
 // --- ExecutionStrategy Factory ---
 std::unique_ptr<ExecutionStrategy> ExecutionStrategy::Create(
     absl::string_view filename_or_extension) {
+  // Check for Python
   if (absl::EndsWith(filename_or_extension, ".py") ||
       filename_or_extension == "python") {
     return std::make_unique<PythonExecutionStrategy>();
   }
-  return std::make_unique<CppExecutionStrategy>();
+  
+  // Check for C
+  if (absl::EndsWith(filename_or_extension, ".c") ||
+      filename_or_extension == "c") {
+    return std::make_unique<CompiledLanguageStrategy>(
+        CompiledLanguageStrategy::Language::kC);
+  }
+  
+  // Default to C++ for .cpp, .cc, .cxx, or unknown
+  return std::make_unique<CompiledLanguageStrategy>(
+      CompiledLanguageStrategy::Language::kCpp);
 }
 
 // --- SandboxedProcess Implementation ---

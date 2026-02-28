@@ -175,6 +175,14 @@ class ProcessRunner {
     }
     return false;
   }
+
+  // NOTE: WaitWithTimeout is DEPRECATED in favor of ProcessTimeoutManager
+  // (see sandbox.h) which uses gRPC Alarm for more efficient timeout handling.
+  // The fork-based watcher approach has the following issues:
+  // - Creates an extra process for each timeout (process table pollution)
+  // - Duplicates parent's address space (memory overhead)
+  // - Requires complex cleanup (zombie process handling)
+  // - Not integrated with gRPC server lifecycle
 };
 
 }  // namespace dcodex::internal

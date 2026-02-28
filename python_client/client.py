@@ -167,7 +167,7 @@ def execute_code(
     Args:
         stub: gRPC stub for the CodeExecutor service.
         code: Code to execute.
-        language: Execution language ("cpp" or "python").
+        language: Execution language ("c", "cpp", or "python").
         description: Optional description of the code.
         stdin_data: Data to feed to the program's standard input.
             Empty string means the program receives EOF immediately.
@@ -326,29 +326,33 @@ def detect_language(file_path: Path) -> str:
         file_path: Path to the source file.
 
     Returns:
-        Language string for the server ("cpp" or "python").
+        Language string for the server ("c", "cpp", or "python").
     """
     suffix = file_path.suffix.lower()
     if suffix == ".py":
         return "python"
+    if suffix == ".c":
+        return "c"
     return "cpp"
 
 
 def detect_language_from_directory(directory: Path) -> str:
     """Detect execution language from directory name.
 
-    The function checks if the directory name contains 'python' to determine
+    The function checks if the directory name contains 'python' or 'c' to determine
     the language. Otherwise, it defaults to 'cpp'.
 
     Args:
         directory: Path to the directory containing code files.
 
     Returns:
-        Language string for the server ("cpp" or "python").
+        Language string for the server ("c", "cpp", or "python").
     """
     dir_name = directory.name.lower()
     if "python" in dir_name:
         return "python"
+    if dir_name == "c":
+        return "c"
     return "cpp"
 
 
@@ -372,14 +376,22 @@ def read_codes_from_directory(directory: Path) -> dict[str, tuple[str, str]]:
         raise FileNotFoundError(f"Directory not found: {directory}")
 
     language = detect_language_from_directory(directory)
-    extension = ".py" if language == "python" else ".cpp"
 
-    for file_path in directory.glob(f"*{extension}"):
-        try:
-            code = read_code_from_file(file_path)
-            codes[file_path.stem] = (code, language)
-        except OSError as e:
-            print(f"Warning: Could not read {file_path}: {e}")
+    # Determine file extensions based on language
+    if language == "python":
+        extensions = [".py"]
+    elif language == "c":
+        extensions = [".c"]
+    else:  # cpp
+        extensions = [".cpp", ".cc", ".cxx"]
+
+    for ext in extensions:
+        for file_path in directory.glob(f"*{ext}"):
+            try:
+                code = read_code_from_file(file_path)
+                codes[file_path.stem] = (code, language)
+            except OSError as e:
+                print(f"Warning: Could not read {file_path}: {e}")
 
     return codes
 
@@ -437,7 +449,14 @@ def execute_codes_from_directory(
     codes = read_codes_from_directory(directory)
     language = detect_language_from_directory(directory)
 
-    extension = ".py" if language == "python" else ".cpp"
+    # Determine extension for error message
+    if language == "python":
+        extension = ".py"
+    elif language == "c":
+        extension = ".c"
+    else:  # cpp
+        extension = ".cpp"
+    
     if not codes:
         print(f"{COLOR_YELLOW}No {extension} files found in {directory}{COLOR_RESET}")
         return
