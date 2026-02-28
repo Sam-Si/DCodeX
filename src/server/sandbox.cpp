@@ -31,8 +31,6 @@
 #include "src/server/process_runner.h"
 #include "src/server/temp_file_manager.h"
 
-namespace dcodex {
-
 ABSL_FLAG(int, sandbox_cpu_time_limit_seconds, 1,
           "CPU time limit in seconds for sandboxed execution");
 ABSL_FLAG(int, sandbox_wall_clock_timeout_seconds, 2,
@@ -41,6 +39,8 @@ ABSL_FLAG(uint64_t, sandbox_memory_limit_bytes, 4ULL * 1024 * 1024 * 1024,
           "Memory limit in bytes for sandboxed execution");
 ABSL_FLAG(uint64_t, sandbox_max_output_bytes, 10 * 1024,
           "Maximum combined stdout+stderr output in bytes");
+
+namespace dcodex {
 
 namespace {
 

@@ -27,6 +27,12 @@
 #include "absl/types/span.h"
 #include "src/server/execution_cache.h"
 
+// Abseil Flags for sandboxed resource limits (must be in global namespace).
+ABSL_DECLARE_FLAG(int, sandbox_cpu_time_limit_seconds);
+ABSL_DECLARE_FLAG(int, sandbox_wall_clock_timeout_seconds);
+ABSL_DECLARE_FLAG(uint64_t, sandbox_memory_limit_bytes);
+ABSL_DECLARE_FLAG(uint64_t, sandbox_max_output_bytes);
+
 namespace dcodex {
 
 // Resource statistics for a sandboxed process.
@@ -104,12 +110,6 @@ class PythonExecutionStrategy : public ExecutionStrategy {
 
   absl::string_view GetStrategyId() const override { return "python"; }
 };
-
-// Abseil Flags for sandboxed resource limits.
-ABSL_DECLARE_FLAG(int, sandbox_cpu_time_limit_seconds);
-ABSL_DECLARE_FLAG(int, sandbox_wall_clock_timeout_seconds);
-ABSL_DECLARE_FLAG(uint64_t, sandbox_memory_limit_bytes);
-ABSL_DECLARE_FLAG(uint64_t, sandbox_max_output_bytes);
 
 // Orchestrator class that manages sandboxed execution and caching.
 class SandboxedProcess {
