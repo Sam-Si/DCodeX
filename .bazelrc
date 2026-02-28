@@ -69,11 +69,10 @@ build:docker --nowatchfs
 build:docker --repo_env=CC=clang
 build:docker --repo_env=CXX=clang++
 build:docker --linkopt=-fuse-ld=lld
-build:docker --linkopt=-Wl,--threads=all
+build:docker --linkopt=-Wl,--threads=9
 build:docker --gc_thrashing_threshold=90
 build:docker --remote_cache_compression=true
 build:docker --cc_output_directory_tag=docker
-build:docker --bzlmod_lockfile_mode=frozen
 build:docker --nolegacy_external_runfiles
 
 # ============================================================
