@@ -80,10 +80,10 @@ class ExecutionReactorState {
   void SetWriting(bool writing) { writing_ = writing; }
 
   // Sets resource statistics.
-  void SetStats(const SandboxedProcess::ResourceStats& stats) { stats_ = stats; }
+  void SetStats(const ResourceStats& stats) { stats_ = stats; }
 
   // Gets resource statistics.
-  const SandboxedProcess::ResourceStats& GetStats() const { return stats_; }
+  const ResourceStats& GetStats() const { return stats_; }
 
   // Sets cache hit flag.
   void SetCacheHit(bool cache_hit) { cache_hit_ = cache_hit; }
@@ -111,7 +111,7 @@ class ExecutionReactorState {
   bool cache_hit_ = false;
   bool wall_clock_timeout_ = false;
   bool output_truncated_ = false;
-  SandboxedProcess::ResourceStats stats_;
+  ResourceStats stats_;
 };
 
 // Handles rejection when too many sandboxes are active.
@@ -188,19 +188,28 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
   }
 
   // Handles completion of execution.
-  void HandleExecutionComplete(const SandboxedProcess::Result& result) {
+  void HandleExecutionComplete(const ExecutionResult& result) {
     absl::MutexLock lock(&mutex_);
     state_.SetStats(result.stats);
     state_.SetCacheHit(result.cache_hit);
     state_.SetWallClockTimeout(result.wall_clock_timeout);
     state_.SetOutputTruncated(result.output_truncated);
     state_.MarkFinished();
-    // If the process was killed by the wall-clock timeout, stream a stderr
-    // chunk so the client sees a clear human-readable message.
-    if (result.wall_clock_timeout) {
-      ExecutionLog timeout_log;
-      timeout_log.set_stderr_chunk(result.error_message + "\n");
-      state_.QueueLog(timeout_log);
+    // If the process failed, stream a stderr chunk so the client sees a
+    // clear human-readable message and a trace of backend actions.
+    if (!result.success) {
+      ExecutionLog error_log;
+      std::string error_msg;
+      if (!result.error_message.empty()) {
+        error_msg += "ERROR: " + result.error_message + "\n";
+      }
+      if (!result.backend_trace.empty()) {
+        error_msg += result.backend_trace + "\n";
+      }
+      if (!error_msg.empty()) {
+        error_log.set_stderr_chunk(error_msg);
+        state_.QueueLog(error_log);
+      }
     }
     MaybeWriteNext();
   }

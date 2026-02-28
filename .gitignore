@@ -1,4 +1,5 @@
 # Bazel
+.bazel/
 /bazel-*
 /bazel-bin
 /bazel-out

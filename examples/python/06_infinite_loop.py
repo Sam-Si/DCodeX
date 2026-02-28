@@ -2,14 +2,14 @@
 """
 Infinite Loop Example
 This script runs an infinite loop that will be terminated by the sandbox.
-The sandbox has a 2-second CPU time limit.
+The sandbox has a 1-second CPU time limit.
 """
 
 
 def main():
     print("Starting infinite loop...")
     print("This program will be terminated by the sandbox timeout.")
-    print("Sandbox CPU limit: 2 seconds")
+    print("Sandbox CPU limit: 1 second")
     
     counter = 0
     

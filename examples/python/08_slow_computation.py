@@ -2,7 +2,7 @@
 """
 Slow Computation Example
 This script performs CPU-intensive work that may exceed time limits.
-The sandbox has a 2-second CPU time limit.
+The sandbox has a 1-second CPU time limit.
 """
 
 import math
@@ -12,7 +12,7 @@ import time
 def main():
     print("Slow Computation Test")
     print("=" * 21)
-    print("Sandbox CPU limit: 2 seconds")
+    print("Sandbox CPU limit: 1 second")
     print("This computation may exceed the time limit...")
     
     start_time = time.time()
@@ -42,7 +42,7 @@ def main():
     print(f"  Result: {result}")
     print(f"  Total time: {total_time:.2f} seconds")
     
-    if total_time > 2.0:
+    if total_time > 1.0:
         print("  WARNING: Exceeded sandbox CPU limit!")
     
     print("\nProgram completed (if you see this, it didn't time out)")

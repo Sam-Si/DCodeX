@@ -2,18 +2,18 @@
 """
 Memory Exhaustion Example
 This script tries to allocate more memory than the sandbox allows.
-The sandbox has a 50 MB memory limit.
+The sandbox has a 500 MB memory limit.
 """
 
 
 def main():
     print("Memory Exhaustion Test")
     print("=" * 22)
-    print("Sandbox memory limit: 50 MB")
+    print("Sandbox memory limit: 500 MB")
     print("Attempting to allocate large amounts of memory...")
     
     allocations = []
-    chunk_size = 10 * 1024 * 1024  # 10 MB per chunk
+    chunk_size = 50 * 1024 * 1024  # 50 MB per chunk
     
     try:
         i = 1

@@ -20,12 +20,12 @@ cc_library(
 cc_library(
     name = "sandbox",
     srcs = ["sandbox.cpp"],
-    hdrs = ["sandbox.h"],
+    hdrs = ["sandbox.h", "output_filter.h", "process_runner.h", "temp_file_manager.h"],
     copts = ["-std=c++23"],
     deps = [
         ":execution_cache",
         "//proto:sandbox_cc_grpc",
-        "@com_github_grpc_grpc//:grpc++",
+        "@com_github_grpc_grpc//:grpc++_unsecure",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/log",
@@ -46,7 +46,7 @@ cc_binary(
         ":sandbox",
         ":execution_cache",
         "//proto:sandbox_cc_grpc",
-        "@com_github_grpc_grpc//:grpc++",
+        "@com_github_grpc_grpc//:grpc++_unsecure",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
         "@com_google_absl//absl/log",

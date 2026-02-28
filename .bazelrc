@@ -19,6 +19,7 @@ common --color=yes
 common --watchfs
 common --incompatible_strict_action_env
 common --repository_cache=/tmp/bazel-repo-cache
+build --symlink_prefix=.bazel/
 
 # ============================================================
 # 4. DEFAULT PERFORMANCE (Speed > Binary Quality)
@@ -60,10 +61,19 @@ build:docker --worker_max_instances=8
 
 # 3. Reduce I/O & Link Time
 build:docker --nobuild_runfile_links
-build:docker --incompatible_strict_action_env
+build:docker --action_env=PATH
 build:docker --strip=never
-build:docker --linkopt=-fuse-ld=gold
 build:docker --nowatchfs
+
+# 4. ULTRA LINKER & MEMORY (New Additions)
+build:docker --repo_env=CC=clang
+build:docker --repo_env=CXX=clang++
+build:docker --linkopt=-fuse-ld=lld
+build:docker --linkopt=-Wl,--threads=9
+build:docker --gc_thrashing_threshold=90
+build:docker --remote_cache_compression=true
+build:docker --cc_output_directory_tag=docker
+build:docker --nolegacy_external_runfiles
 
 # ============================================================
 # 6. MACOS NATIVE CONFIG (--config=macos)
