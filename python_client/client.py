@@ -93,21 +93,23 @@ def execute_code(
     code: str,
         description: str = "",
         stdin_data: str = "",
+        language: str = "cpp",
 ) -> ExecutionResult:
     """Execute code and return results with timing.
     
     Args:
         stub: gRPC stub for the CodeExecutor service.
-        code: C++ code to execute.
+        code: Code to execute.
         description: Optional description of the code.
         stdin_data: Data to feed to the program's standard input.
                     Empty string means the program receives EOF immediately.
+        language: Execution language ("cpp" or "python").
         
     Returns:
         ExecutionResult containing stdout, stderr, timing, and cache status.
     """
     request: Any = sandbox_pb2.CodeRequest(
-        language="cpp", code=code, stdin_data=stdin_data
+        language=language, code=code, stdin_data=stdin_data
     )
     
     start_time = time.time()
@@ -185,10 +187,10 @@ def print_results(results: ExecutionResult, show_output: bool = True) -> None:
 
 
 def read_code_from_file(file_path: Path) -> str:
-    """Read C++ code from a file.
+    """Read source code from a file.
     
     Args:
-        file_path: Path to the C++ source file.
+        file_path: Path to the source file.
         
     Returns:
         Contents of the file as a string.
@@ -201,11 +203,27 @@ def read_code_from_file(file_path: Path) -> str:
         return f.read()
 
 
-def read_codes_from_directory(directory: Path) -> Dict[str, str]:
-    """Read all C++ code files from a directory.
+def detect_language(file_path: Path) -> str:
+    """Detect execution language from file extension.
     
     Args:
-        directory: Path to the directory containing .cpp files.
+        file_path: Path to the source file.
+        
+    Returns:
+        Language string for the server ("cpp" or "python").
+    """
+    suffix = file_path.suffix.lower()
+    if suffix == ".py":
+        return "python"
+    return "cpp"
+
+
+def read_codes_from_directory(directory: Path, language: str) -> Dict[str, str]:
+    """Read all code files from a directory.
+    
+    Args:
+        directory: Path to the directory containing code files.
+        language: Execution language ("cpp" or "python").
         
     Returns:
         Dictionary mapping file names to their contents.
@@ -216,13 +234,14 @@ def read_codes_from_directory(directory: Path) -> Dict[str, str]:
     codes: Dict[str, str] = {}
     if not directory.exists():
         raise FileNotFoundError(f"Directory not found: {directory}")
-    
-    for file_path in directory.glob("*.cpp"):
+
+    extension = ".py" if language == "python" else ".cpp"
+    for file_path in directory.glob(f"*{extension}"):
         try:
             codes[file_path.stem] = read_code_from_file(file_path)
         except IOError as e:
             print(f"Warning: Could not read {file_path}: {e}")
-    
+
     return codes
 
 
@@ -231,55 +250,64 @@ def execute_single_code(
     name: str,
         code: str,
         stdin_data: str = "",
+        language: str = "cpp",
 ) -> None:
     """Execute a single code example and print results.
     
     Args:
         stub: gRPC stub for the CodeExecutor service.
         name: Name/description of the code example.
-        code: C++ code to execute.
+        code: Code to execute.
         stdin_data: Data to feed to the program's standard input.
+        language: Execution language ("cpp" or "python").
     """
     print(f"\n📝 {name}")
     print("=" * 50)
-    results = execute_code(stub, code, name, stdin_data=stdin_data)
+    results = execute_code(
+        stub, code, name, stdin_data=stdin_data, language=language
+    )
     print_results(results)
 
 
 def execute_codes_from_directory(
     stub: Any,
     directory: Path,
-    repeat_for_cache_demo: bool = False
+    repeat_for_cache_demo: bool = False,
+    language: str = "cpp",
 ) -> None:
     """Execute all code files from a directory.
     
     Args:
         stub: gRPC stub for the CodeExecutor service.
-        directory: Path to the directory containing .cpp files.
+        directory: Path to the directory containing code files.
         repeat_for_cache_demo: Whether to run each file twice to demonstrate caching.
+        language: Execution language ("cpp" or "python").
     """
-    codes = read_codes_from_directory(directory)
-    
+    codes = read_codes_from_directory(directory, language)
+
+    extension = ".py" if language == "python" else ".cpp"
     if not codes:
-        print(f"No .cpp files found in {directory}")
+        print(f"No {extension} files found in {directory}")
         return
-    
+
     print(f"\n📁 Found {len(codes)} code file(s) in {directory}")
     print("=" * 60)
-    
+
     for name, code in codes.items():
         print(f"\n🔴 {name} - First Run")
         print("-" * 60)
-        results1 = execute_code(stub, code, name)
+        results1 = execute_code(stub, code, name, language=language)
         print_results(results1)
-        
+
         if repeat_for_cache_demo:
             time.sleep(0.5)
             print(f"\n🟢 {name} - Second Run (Cache Demo)")
             print("-" * 60)
-            results2 = execute_code(stub, code, name + " - cached")
+            results2 = execute_code(
+                stub, code, name + " - cached", language=language
+            )
             print_results(results2)
-            
+
             if results2.cache_hit:
                 speedup = results1.actual_time / max(results2.actual_time, 1)
                 print(f"\n⚡ Cache Speedup: {speedup:.2f}x faster")
@@ -419,7 +447,10 @@ def run_interactive_mode(stub: Any) -> None:
             file_path = input("Enter file path: ").strip()
             try:
                 code = read_code_from_file(Path(file_path))
-                execute_single_code(stub, Path(file_path).stem, code)
+                language = detect_language(Path(file_path))
+                execute_single_code(
+                    stub, Path(file_path).stem, code, language=language
+                )
             except (FileNotFoundError, IOError) as e:
                 print(f"Error: {e}")
         elif choice == "4":
@@ -461,7 +492,7 @@ def main() -> None:
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="DCodeX Python Client - Execute C++ code with resource monitoring"
+        description="DCodeX Python Client - Execute code with resource monitoring"
     )
     parser.add_argument(
         "--server",
@@ -476,12 +507,18 @@ def main() -> None:
     parser.add_argument(
         "--directory", "-d",
         type=Path,
-        help="Directory containing .cpp files to execute"
+        help="Directory containing code files to execute"
     )
     parser.add_argument(
         "--file", "-f",
         type=Path,
-        help="Specific .cpp file to execute"
+        help="Specific code file to execute"
+    )
+    parser.add_argument(
+        "--language", "-l",
+        choices=("cpp", "python"),
+        default=None,
+        help="Override language detection for --file/--directory"
     )
     parser.add_argument(
         "--cache-demo", "-c",
@@ -530,13 +567,23 @@ def main() -> None:
         # Execute specific file
         try:
             code = read_code_from_file(args.file)
-            execute_single_code(stub, args.file.stem, code, stdin_data=stdin_data)
+            language = args.language or detect_language(args.file)
+            execute_single_code(
+                stub,
+                args.file.stem,
+                code,
+                stdin_data=stdin_data,
+                language=language,
+            )
         except (FileNotFoundError, IOError) as e:
             print(f"Error: {e}")
             sys.exit(1)
     elif args.directory:
         # Execute all files from directory
-        execute_codes_from_directory(stub, args.directory, args.cache_demo)
+        language = args.language or "cpp"
+        execute_codes_from_directory(
+            stub, args.directory, args.cache_demo, language=language
+        )
     elif args.interactive:
         # Run interactive mode
         run_interactive_mode(stub)
