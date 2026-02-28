@@ -126,8 +126,10 @@ def execute_code(
     for response in responses:
         if response.stdout_chunk:
             stdout_output.append(response.stdout_chunk)
+            print(response.stdout_chunk, end='', flush=True)
         if response.stderr_chunk:
             stderr_output.append(response.stderr_chunk)
+            print(f"STDERR: {response.stderr_chunk}", end='', flush=True)
         if response.peak_memory_bytes > 0:
             peak_memory = response.peak_memory_bytes
         if response.execution_time_ms > 0:
@@ -152,12 +154,12 @@ def execute_code(
     )
 
 
-def print_results(results: ExecutionResult, show_output: bool = True) -> None:
+def print_results(results: ExecutionResult, show_output: bool = False) -> None:
     """Print execution results in a formatted way.
     
     Args:
         results: ExecutionResult to print.
-        show_output: Whether to show stdout/stderr output.
+        show_output: Whether to show stdout/stderr output (defaults to False as output is now streamed).
     """
     if show_output:
         if results.stdout:
