@@ -89,6 +89,18 @@ class CppExecutionStrategy : public ExecutionStrategy {
   absl::string_view GetStrategyId() const override { return "cpp"; }
 };
 
+// Python implementation of the ExecutionStrategy.
+class PythonExecutionStrategy : public ExecutionStrategy {
+ public:
+  PythonExecutionStrategy() = default;
+  ~PythonExecutionStrategy() override = default;
+
+  ExecutionResult Execute(absl::string_view code, absl::string_view stdin_data,
+                          OutputCallback callback) override;
+
+  absl::string_view GetStrategyId() const override { return "python"; }
+};
+
 // Centralized configuration for sandboxed resource limits.
 struct SandboxLimits {
   static constexpr int kCpuTimeLimitSeconds = 1;
@@ -102,8 +114,8 @@ class SandboxedProcess {
  public:
   // Compiles and runs code with caching support.
   [[nodiscard]] static ExecutionResult CompileAndRunStreaming(
-      absl::string_view code, absl::string_view stdin_data,
-      OutputCallback callback);
+      absl::string_view language, absl::string_view code,
+      absl::string_view stdin_data, OutputCallback callback);
 
   // Accesses the global execution cache.
   [[nodiscard]] static ExecutionCache& GetCache();

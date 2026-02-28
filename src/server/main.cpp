@@ -163,6 +163,7 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
   // Executes code in the background thread.
   void ExecuteInBackground() {
     auto result = SandboxedProcess::CompileAndRunStreaming(
+        request_->language(),
         request_->code(),
         request_->stdin_data(),
         [this](absl::string_view stdout_chunk, absl::string_view stderr_chunk) {
