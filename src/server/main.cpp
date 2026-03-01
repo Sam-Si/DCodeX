@@ -160,8 +160,10 @@ struct ReactorInternalState {
 
 class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
  public:
-  ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter)
-      : shared_state_(std::make_shared<ReactorInternalState>(request, counter, this)) {
+  ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter,
+                 WarmWorkerPool* pool)
+      : shared_state_(std::make_shared<ReactorInternalState>(request, counter, this)),
+        pool_(pool) {
     shared_state_->counter.fetch_add(1);
   }
 
@@ -290,6 +292,9 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
     }
     shared_state_->notify_cv.SignalAll();
     shared_state_->counter.fetch_sub(1);
+    if (pool_ != nullptr) {
+      pool_->ReleaseReactor(this);
+    }
   }
 
   void OnCancel() override {
@@ -303,6 +308,7 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
 
  private:
   std::shared_ptr<ReactorInternalState> shared_state_;
+  WarmWorkerPool* pool_;
 };
 
 WarmWorkerPool::WarmWorkerPool(int max_workers)
@@ -413,7 +419,6 @@ void WarmWorkerPool::Worker::Run() {
     reactor->StartExecution();
     reactor->PumpWrites();
     pool_->NotifyWorkerIdle();
-    pool_->ReleaseReactor(reactor.get());
     reactor.reset();
   }
 }
@@ -442,7 +447,8 @@ class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
     if (active_sandboxes_.load() >= absl::GetFlag(FLAGS_max_concurrent_sandboxes)) {
       return new RejectReactor();
     }
-    auto reactor = std::make_shared<ExecuteReactor>(request, active_sandboxes_);
+    auto reactor =
+        std::make_shared<ExecuteReactor>(request, active_sandboxes_, &worker_pool_);
     absl::Status assignment = worker_pool_.AcquireWorker(reactor);
     if (!assignment.ok()) {
       LOG(WARNING) << "Worker pool rejected request: " << assignment;
