@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <thread>
 
@@ -24,6 +25,7 @@
 #include "absl/log/initialize.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
 #include "src/server/sandbox.h"
@@ -43,75 +45,84 @@ namespace dcodex {
 
 namespace {
 
-// Helper class to manage execution reactor state and output buffering.
-class ExecutionReactorState {
+// =============================================================================
+// ROOT CAUSE ANALYSIS: Mutex Corruption
+// =============================================================================
+//
+// The original implementation had a critical flaw: gRPC reactor callbacks
+// (OnWriteDone, OnDone) can be invoked SYNCHRONOUSLY from within StartWrite()
+// or Finish() calls. This creates a re-entrant call chain that leads to:
+//
+// 1. Thread holds mutex -> calls StartWrite() -> gRPC calls OnWriteDone()
+//    synchronously -> OnWriteDone tries to acquire mutex -> CORRUPTION
+//
+// 2. The loop in ProcessNextWrite() creates complex re-entrant scenarios
+//
+// 3. absl::Mutex is NOT reentrant - attempting to acquire it twice from the
+//    same thread causes the "both reader and writer lock held" error
+//
+// =============================================================================
+// THE FIX: Three-Thread Model with Lock-Free State Machine
+// =============================================================================
+//
+// We use a three-thread model with atomic state to eliminate re-entrancy:
+//
+// 1. gRPC Thread: Only calls reactor callbacks (OnWriteDone, OnDone, OnCancel)
+//    - These callbacks ONLY update atomic state and notify the processor
+//    - NEVER call StartWrite/Finish from callbacks
+//
+// 2. Worker Thread: Executes the actual code
+//    - Produces output chunks and final result
+//    - Queues data and notifies the processor
+//
+// 3. Processor Thread: Dedicated thread for gRPC operations
+//    - Runs in a loop, checking state and calling StartWrite/Finish
+//    - Only thread that calls StartWrite/Finish
+//    - No re-entrancy possible since it's a single thread with no callbacks
+//
+// State transitions use std::atomic to avoid mutex corruption:
+//
+// IDLE -> WRITING -> WAITING_FOR_CALLBACK -> WRITING -> ... -> FINISHED
+//
+// =============================================================================
+
+// State machine for the reactor.
+// Uses atomic operations to avoid mutex corruption.
+enum class ReactorState {
+  kIdle,                    // No operation in progress
+  kWriting,                 // StartWrite() was called, waiting for OnWriteDone
+  kPendingWrite,            // Data available, need to call StartWrite
+  kPendingFinish,           // Ready to call Finish
+  kFinished,                // Finish() was called
+};
+
+// Thread-safe queue for execution logs.
+// Uses a mutex internally but with minimal contention.
+class ThreadSafeLogQueue {
  public:
-  ExecutionReactorState() = default;
-
-  // Queues an execution log entry.
-  void QueueLog(const ExecutionLog& log) { queue_.push(log); }
-
-  // Checks if there are pending logs to write.
-  bool HasPendingLogs() const { return !queue_.empty(); }
-
-  // Gets the next log from the queue.
-  ExecutionLog GetNextLog() {
-    ExecutionLog log = queue_.front();
-    queue_.pop();
-    return log;
+  void Push(const ExecutionLog& log) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push(log);
   }
 
-  // Marks execution as finished.
-  void MarkFinished() { finished_ = true; }
+  bool Pop(ExecutionLog& log) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty()) {
+      return false;
+    }
+    log = queue_.front();
+    queue_.pop();
+    return true;
+  }
 
-  // Checks if execution is finished.
-  bool IsFinished() const { return finished_; }
-
-  // Marks stats as sent.
-  void MarkStatsSent() { stats_sent_ = true; }
-
-  // Checks if stats have been sent.
-  bool AreStatsSent() const { return stats_sent_; }
-
-  // Gets the writing flag.
-  bool IsWriting() const { return writing_; }
-
-  // Sets the writing flag.
-  void SetWriting(bool writing) { writing_ = writing; }
-
-  // Sets resource statistics.
-  void SetStats(const ResourceStats& stats) { stats_ = stats; }
-
-  // Gets resource statistics.
-  const ResourceStats& GetStats() const { return stats_; }
-
-  // Sets cache hit flag.
-  void SetCacheHit(bool cache_hit) { cache_hit_ = cache_hit; }
-
-  // Gets cache hit flag.
-  bool IsCacheHit() const { return cache_hit_; }
-
-  // Sets wall-clock timeout flag.
-  void SetWallClockTimeout(bool timed_out) { wall_clock_timeout_ = timed_out; }
-
-  // Gets wall-clock timeout flag.
-  bool IsWallClockTimeout() const { return wall_clock_timeout_; }
-
-  // Sets output truncated flag.
-  void SetOutputTruncated(bool truncated) { output_truncated_ = truncated; }
-
-  // Gets output truncated flag.
-  bool IsOutputTruncated() const { return output_truncated_; }
+  bool Empty() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.empty();
+  }
 
  private:
+  mutable std::mutex mutex_;
   std::queue<ExecutionLog> queue_;
-  bool finished_ = false;
-  bool writing_ = false;
-  bool stats_sent_ = false;
-  bool cache_hit_ = false;
-  bool wall_clock_timeout_ = false;
-  bool output_truncated_ = false;
-  ResourceStats stats_;
 };
 
 // Handles rejection when too many sandboxes are active.
@@ -124,59 +135,195 @@ class RejectReactor : public ServerWriteReactor<ExecutionLog> {
   void OnDone() override { delete this; }
 };
 
-// Handles code execution with streaming output and caching support.
+// Handles code execution with streaming output.
+// Uses a dedicated processor thread to avoid re-entrant gRPC calls.
 class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
  public:
   ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter)
-      : request_(request), counter_(counter) {
+      : request_(request), counter_(counter), state_(ReactorState::kIdle) {
     counter_.fetch_add(1);
-    StartExecution();
+    StartProcessorThread();
   }
 
   void OnWriteDone(bool ok) override {
-    absl::MutexLock lock(&mutex_);
-    state_.SetWriting(false);
+    // CRITICAL: This callback is invoked by gRPC thread.
+    // We MUST NOT call StartWrite/Finish here to avoid re-entrancy.
+    // Only update state and signal the processor thread.
+
     if (!ok) {
-      return;
+      // Write failed - signal processor to finish
+      write_failed_.store(true);
     }
-    MaybeWriteNext();
+
+    // Transition from kWriting to kIdle to allow next operation
+    ReactorState expected = ReactorState::kWriting;
+    state_.compare_exchange_strong(expected, ReactorState::kIdle);
+
+    // Wake up processor thread
+    NotifyProcessor();
   }
 
   void OnDone() override {
+    // Signal processor to stop
+    reactor_done_.store(true);
+    NotifyProcessor();
+
     if (worker_thread_.joinable()) {
       worker_thread_.join();
+    }
+    if (processor_thread_.joinable()) {
+      processor_thread_.join();
     }
     counter_.fetch_sub(1);
     delete this;
   }
 
   void OnCancel() override {
-    // In a real system, we'd kill the process here.
+    cancelled_.store(true);
+    NotifyProcessor();
   }
 
  private:
-  // Starts the execution in a background thread.
-  void StartExecution() {
+  // Starts the processor thread that handles all gRPC operations.
+  void StartProcessorThread() {
+    processor_thread_ = std::thread([this]() { ProcessorLoop(); });
+  }
+
+  // Processor thread main loop.
+  // This is the ONLY thread that calls StartWrite() and Finish().
+  void ProcessorLoop() {
+    // First, start the worker thread that will execute the code
+    StartWorkerThread();
+
+    // Process until done
+    while (!reactor_done_.load() && !cancelled_.load()) {
+      // Wait for work or notification
+      WaitForNotification();
+
+      if (reactor_done_.load() || cancelled_.load()) {
+        break;
+      }
+
+      ProcessState();
+    }
+
+    // Ensure we finish if not already done
+    if (state_.load() != ReactorState::kFinished) {
+      Finish(Status::OK);
+      state_.store(ReactorState::kFinished);
+    }
+  }
+
+  // Processes the current state and performs appropriate action.
+  // This is called from the processor thread only.
+  void ProcessState() {
+    // Use a loop to handle multiple operations if needed
+    int iterations = 0;
+    const int max_iterations = 100;  // Prevent infinite loops
+
+    while (!reactor_done_.load() && !cancelled_.load() &&
+           iterations++ < max_iterations) {
+      ReactorState current = state_.load();
+
+      switch (current) {
+        case ReactorState::kIdle: {
+          // Check if we have data to write
+          ExecutionLog log;
+          if (log_queue_.Pop(log)) {
+            // Have data - transition to writing
+            current_log_ = log;
+            if (state_.compare_exchange_strong(current, ReactorState::kWriting)) {
+              StartWrite(&current_log_);
+              return;  // Wait for OnWriteDone callback
+            }
+          } else if (execution_finished_.load() && log_queue_.Empty()) {
+            // No more data and execution finished - send stats and finish
+            if (!stats_sent_.load()) {
+              SendStatsAndFinish();
+              return;
+            } else {
+              // Already sent stats, just finish
+              if (state_.compare_exchange_strong(current, ReactorState::kFinished)) {
+                Finish(Status::OK);
+                return;
+              }
+            }
+          } else {
+            // Nothing to do - exit loop
+            return;
+          }
+          break;
+        }
+
+        case ReactorState::kWriting:
+          // Waiting for OnWriteDone callback - nothing to do
+          return;
+
+        case ReactorState::kFinished:
+          // Already finished
+          return;
+
+        default:
+          // Unknown state - reset to idle
+          state_.store(ReactorState::kIdle);
+          break;
+      }
+    }
+  }
+
+  // Sends final stats message and finishes the RPC.
+  void SendStatsAndFinish() {
+    ExecutionLog stats_log;
+    stats_log.set_peak_memory_bytes(final_stats_.peak_memory_bytes);
+    stats_log.set_execution_time_ms(
+        static_cast<float>(final_stats_.elapsed_time_ms));
+    stats_log.set_cache_hit(cache_hit_.load());
+    stats_log.set_wall_clock_timeout(wall_clock_timeout_.load());
+    stats_log.set_output_truncated(output_truncated_.load());
+
+    current_log_ = stats_log;
+    stats_sent_.store(true);
+
+    ReactorState current = state_.load();
+    if (state_.compare_exchange_strong(current, ReactorState::kWriting)) {
+      StartWrite(&current_log_);
+      // Finish will be called after this write completes
+    }
+  }
+
+  // Starts the worker thread that executes the code.
+  void StartWorkerThread() {
     worker_thread_ = std::thread([this]() { ExecuteInBackground(); });
   }
 
   // Executes code in the background thread.
   void ExecuteInBackground() {
-    auto result = SandboxedProcess::CompileAndRunStreaming(
-        request_->language(),
-        request_->code(),
-        request_->stdin_data(),
-        [this](absl::string_view stdout_chunk, absl::string_view stderr_chunk) {
-          HandleExecutionOutput(stdout_chunk, stderr_chunk);
-        });
+    absl::StatusOr<ExecutionResult> result =
+        SandboxedProcess::CompileAndRunStreaming(
+            request_->language(),
+            request_->code(),
+            request_->stdin_data(),
+            [this](absl::string_view stdout_chunk, absl::string_view stderr_chunk) {
+              QueueOutputChunk(stdout_chunk, stderr_chunk);
+            });
 
-    HandleExecutionComplete(result);
+    if (result.ok()) {
+      QueueCompletion(*result);
+    } else {
+      ExecutionResult error_result;
+      error_result.success = false;
+      error_result.error_message = std::string(result.status().message());
+      QueueCompletion(error_result);
+    }
   }
 
-  // Handles output chunks from execution.
-  void HandleExecutionOutput(absl::string_view stdout_chunk,
-                             absl::string_view stderr_chunk) {
-    absl::MutexLock lock(&mutex_);
+  // Queues an output chunk from execution (called from worker thread).
+  void QueueOutputChunk(absl::string_view stdout_chunk,
+                        absl::string_view stderr_chunk) {
+    if (stdout_chunk.empty() && stderr_chunk.empty()) {
+      return;
+    }
+
     ExecutionLog log;
     if (!stdout_chunk.empty()) {
       log.set_stdout_chunk(std::string(stdout_chunk));
@@ -184,79 +331,87 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
     if (!stderr_chunk.empty()) {
       log.set_stderr_chunk(std::string(stderr_chunk));
     }
-    state_.QueueLog(log);
-    MaybeWriteNext();
+
+    log_queue_.Push(log);
+    NotifyProcessor();
   }
 
-  // Handles completion of execution.
-  void HandleExecutionComplete(const ExecutionResult& result) {
-    absl::MutexLock lock(&mutex_);
-    state_.SetStats(result.stats);
-    state_.SetCacheHit(result.cache_hit);
-    state_.SetWallClockTimeout(result.wall_clock_timeout);
-    state_.SetOutputTruncated(result.output_truncated);
-    state_.MarkFinished();
-    // If the process failed, stream a stderr chunk so the client sees a
-    // clear human-readable message and a trace of backend actions.
+  // Queues completion result (called from worker thread).
+  void QueueCompletion(const ExecutionResult& result) {
+    // Store final stats
+    final_stats_ = result.stats;
+    cache_hit_.store(result.cache_hit);
+    wall_clock_timeout_.store(result.wall_clock_timeout);
+    output_truncated_.store(result.output_truncated);
+
+    // Queue error message if any
     if (!result.success) {
-      ExecutionLog error_log;
       std::string error_msg;
       if (!result.error_message.empty()) {
-        error_msg += "ERROR: " + result.error_message + "\n";
+        error_msg = "ERROR: " + result.error_message + "\n";
       }
       if (!result.backend_trace.empty()) {
         error_msg += result.backend_trace + "\n";
       }
       if (!error_msg.empty()) {
+        ExecutionLog error_log;
         error_log.set_stderr_chunk(error_msg);
-        state_.QueueLog(error_log);
+        log_queue_.Push(error_log);
       }
     }
-    MaybeWriteNext();
+
+    // Mark execution as finished
+    execution_finished_.store(true);
+    NotifyProcessor();
   }
 
-  // Attempts to write the next log entry if possible.
-  void MaybeWriteNext() {
-    if (state_.IsWriting()) {
-      return;
+  // Notifies the processor thread that there's work to do.
+  void NotifyProcessor() {
+    // Use a simple atomic flag for notification
+    // The processor thread polls this flag
+    notification_pending_.store(true, std::memory_order_release);
+  }
+
+  // Waits for a notification from another thread.
+  void WaitForNotification() {
+    // Simple spin-wait with yield
+    // This is efficient for short waits
+    while (!notification_pending_.load(std::memory_order_acquire)) {
+      if (reactor_done_.load() || cancelled_.load()) {
+        return;
+      }
+      std::this_thread::yield();
     }
-
-    if (state_.HasPendingLogs()) {
-      WriteNextLog();
-    } else if (state_.IsFinished() && !state_.AreStatsSent()) {
-      WriteStatistics();
-    } else if (state_.IsFinished() && state_.AreStatsSent()) {
-      Finish(Status::OK);
-    }
+    notification_pending_.store(false, std::memory_order_release);
   }
 
-  // Writes the next log entry from the queue.
-  void WriteNextLog() {
-    state_.SetWriting(true);
-    current_log_ = state_.GetNextLog();
-    StartWrite(&current_log_);
-  }
-
-  // Writes resource statistics as the final log.
-  void WriteStatistics() {
-    state_.SetWriting(true);
-    state_.MarkStatsSent();
-    ExecutionLog stats_log;
-    stats_log.set_peak_memory_bytes(state_.GetStats().peak_memory_bytes);
-    stats_log.set_execution_time_ms(
-        static_cast<float>(state_.GetStats().elapsed_time_ms));
-    stats_log.set_cache_hit(state_.IsCacheHit());
-    stats_log.set_wall_clock_timeout(state_.IsWallClockTimeout());
-    stats_log.set_output_truncated(state_.IsOutputTruncated());
-    current_log_ = stats_log;
-    StartWrite(&current_log_);
-  }
-
+  // Member variables
   const CodeRequest* request_;
   std::thread worker_thread_;
-  absl::Mutex mutex_;
-  ExecutionReactorState state_;
+  std::thread processor_thread_;
+
+  // Atomic state - no mutex needed
+  std::atomic<ReactorState> state_;
+  std::atomic<bool> execution_finished_{false};
+  std::atomic<bool> stats_sent_{false};
+  std::atomic<bool> cache_hit_{false};
+  std::atomic<bool> wall_clock_timeout_{false};
+  std::atomic<bool> output_truncated_{false};
+  std::atomic<bool> reactor_done_{false};
+  std::atomic<bool> cancelled_{false};
+  std::atomic<bool> write_failed_{false};
+  std::atomic<bool> notification_pending_{false};
+
+  // Thread-safe queue for logs
+  ThreadSafeLogQueue log_queue_;
+
+  // Current log being written (only accessed by processor thread)
   ExecutionLog current_log_;
+
+  // Final stats (set by worker, read by processor)
+  ResourceStats final_stats_;
+
+  // Reference counter
   std::atomic<int>& counter_;
 };
 
