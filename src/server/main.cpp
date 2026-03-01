@@ -15,11 +15,11 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <memory>
-#include <mutex>
 #include <queue>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -28,6 +28,8 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/substitute.h"
+#include "absl/synchronization/condvar.h"
+#include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
 #include "src/server/sandbox.h"
 
@@ -57,13 +59,13 @@ enum class ReactorState {
 // Thread-safe log queue
 class ThreadSafeLogQueue {
  public:
-  void Push(const ExecutionLog& log) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    queue_.push(log);
+  void Push(ExecutionLog log) {
+    absl::MutexLock lock(&mutex_);
+    queue_.push(std::move(log));
   }
 
   bool Pop(ExecutionLog& log) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    absl::MutexLock lock(&mutex_);
     if (queue_.empty()) return false;
     log = std::move(queue_.front());
     queue_.pop();
@@ -71,13 +73,139 @@ class ThreadSafeLogQueue {
   }
 
   bool Empty() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    absl::MutexLock lock(&mutex_);
     return queue_.empty();
   }
 
  private:
-  mutable std::mutex mutex_;
+  mutable absl::Mutex mutex_;
   std::queue<ExecutionLog> queue_;
+};
+
+class WarmWorkerPool {
+ public:
+  explicit WarmWorkerPool(int max_workers)
+      : max_workers_(max_workers),
+        idle_workers_(0),
+        shutting_down_(false) {}
+
+  WarmWorkerPool(const WarmWorkerPool&) = delete;
+  WarmWorkerPool& operator=(const WarmWorkerPool&) = delete;
+
+  void Start() {
+    absl::MutexLock lock(&mutex_);
+    if (!workers_.empty()) {
+      return;
+    }
+    const int worker_count = max_workers_ > 0 ? max_workers_ : 1;
+    workers_.reserve(worker_count);
+    for (int i = 0; i < worker_count; ++i) {
+      workers_.push_back(std::make_unique<Worker>(this));
+      idle_workers_++;
+    }
+  }
+
+  void Shutdown() {
+    absl::MutexLock lock(&mutex_);
+    if (shutting_down_) {
+      return;
+    }
+    shutting_down_ = true;
+    for (const auto& worker : workers_) {
+      worker->Notify();
+    }
+  }
+
+  absl::StatusOr<class ExecuteReactor*> AcquireWorker(
+      std::unique_ptr<class ExecuteReactor> reactor) {
+    absl::MutexLock lock(&mutex_);
+    if (shutting_down_) {
+      return absl::FailedPreconditionError("Worker pool is shutting down");
+    }
+    if (idle_workers_ == 0) {
+      return absl::ResourceExhaustedError("No idle workers available");
+    }
+    for (const auto& worker : workers_) {
+      if (worker->TryAssign(std::move(reactor))) {
+        idle_workers_--;
+        return worker->GetActiveReactor();
+      }
+    }
+    return absl::InternalError("Failed to assign worker");
+  }
+
+  void NotifyWorkerIdle() {
+    absl::MutexLock lock(&mutex_);
+    idle_workers_++;
+  }
+
+ private:
+  class Worker {
+   public:
+    explicit Worker(WarmWorkerPool* pool)
+        : pool_(pool),
+          thread_(&Worker::Run, this) {}
+
+    ~Worker() { Join(); }
+
+    Worker(const Worker&) = delete;
+    Worker& operator=(const Worker&) = delete;
+
+    bool TryAssign(std::unique_ptr<class ExecuteReactor> reactor) {
+      absl::MutexLock lock(&mutex_);
+      if (reactor_ || stopping_) {
+        return false;
+      }
+      reactor_ = std::move(reactor);
+      active_reactor_ = reactor_.get();
+      cv_.Signal();
+      return true;
+    }
+
+    ExecuteReactor* GetActiveReactor() const {
+      absl::MutexLock lock(&mutex_);
+      return active_reactor_;
+    }
+
+    void ClearActiveReactor() {
+      absl::MutexLock lock(&mutex_);
+      active_reactor_ = nullptr;
+    }
+
+    void Notify() {
+      absl::MutexLock lock(&mutex_);
+      stopping_ = true;
+      cv_.Signal();
+    }
+
+    void Join() {
+      {
+        absl::MutexLock lock(&mutex_);
+        stopping_ = true;
+        cv_.Signal();
+      }
+      if (thread_.joinable()) {
+        thread_.join();
+      }
+    }
+
+   private:
+    void Run();
+
+    WarmWorkerPool* pool_;
+    std::unique_ptr<class ExecuteReactor> reactor_;
+    mutable absl::Mutex mutex_;
+    absl::CondVar cv_;
+    ExecuteReactor* active_reactor_ = nullptr;
+    bool stopping_ = false;
+    std::thread thread_;
+  };
+
+  absl::Mutex mutex_;
+  std::vector<std::unique_ptr<Worker>> workers_;
+  int max_workers_;
+  int idle_workers_;
+  bool shutting_down_;
 };
 
 // Forward declaration
@@ -90,7 +218,7 @@ struct ReactorInternalState {
 
   const CodeRequest* request;
   std::atomic<int>& counter;
-  ExecuteReactor* reactor; // Raw pointer to reactor, only used by processor thread
+  ExecuteReactor* reactor;
 
   std::atomic<ReactorState> state;
   std::atomic<bool> execution_finished{false};
@@ -99,9 +227,9 @@ struct ReactorInternalState {
   std::atomic<bool> wall_clock_timeout{false};
   std::atomic<bool> output_truncated{false};
   std::atomic<bool> cancelled{false};
-  
-  std::mutex notify_mutex;
-  std::condition_variable notify_cv;
+
+  absl::Mutex notify_mutex;
+  absl::CondVar notify_cv;
   bool notification_pending = false;
   bool reactor_done = false;
 
@@ -115,108 +243,112 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
   ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter)
       : shared_state_(std::make_shared<ReactorInternalState>(request, counter, this)) {
     shared_state_->counter.fetch_add(1);
-    
-    // Start processor thread
-    std::thread processor([state = shared_state_]() {
-      // Start worker thread
-      std::thread worker([state]() {
-        absl::StatusOr<ExecutionResult> result = SandboxedProcess::CompileAndRunStreaming(
-            state->request->language(), state->request->code(), state->request->stdin_data(),
-            [state](absl::string_view o, absl::string_view e) {
-              if (o.empty() && e.empty()) return;
-              ExecutionLog log;
-              if (!o.empty()) log.set_stdout_chunk(std::string(o));
-              if (!e.empty()) log.set_stderr_chunk(std::string(e));
-              state->log_queue.Push(std::move(log));
-              {
-                std::lock_guard<std::mutex> lock(state->notify_mutex);
-                state->notification_pending = true;
-              }
-              state->notify_cv.notify_one();
-            });
+  }
 
-        ExecutionResult final_res;
-        if (result.ok()) {
-          final_res = *result;
-        } else {
-          final_res.success = false;
-          final_res.error_message = std::string(result.status().message());
-        }
-
-        // Handle completion
-        state->final_stats = final_res.stats;
-        state->cache_hit.store(final_res.cache_hit);
-        state->wall_clock_timeout.store(final_res.wall_clock_timeout);
-        state->output_truncated.store(final_res.output_truncated);
-
-        if (!final_res.success) {
-          std::string error_msg;
-          if (!final_res.error_message.empty()) {
-            absl::SubstituteAndAppend(&error_msg, "ERROR: $0\n", final_res.error_message);
-          }
-          if (!final_res.backend_trace.empty()) {
-            absl::SubstituteAndAppend(&error_msg, "$0\n", final_res.backend_trace);
-          }
-          if (!error_msg.empty()) {
-            ExecutionLog error_log;
-            error_log.set_stderr_chunk(error_msg);
-            state->log_queue.Push(std::move(error_log));
-          }
-        }
-        state->execution_finished.store(true);
-        {
-          std::lock_guard<std::mutex> lock(state->notify_mutex);
-          state->notification_pending = true;
-        }
-        state->notify_cv.notify_one();
-      });
-      worker.detach();
-
-      while (true) {
-        {
-          std::unique_lock<std::mutex> lock(state->notify_mutex);
-          state->notify_cv.wait(lock, [&] {
-            return state->notification_pending || state->reactor_done || state->cancelled.load();
-          });
-          if (state->reactor_done || (state->cancelled.load() && state->state.load() == ReactorState::kIdle)) {
-            break;
-          }
-          state->notification_pending = false;
-        }
-
-        // Process state
-        ReactorState current = state->state.load();
-        if (current == ReactorState::kIdle) {
+  void StartExecution() {
+    absl::StatusOr<ExecutionResult> result = SandboxedProcess::CompileAndRunStreaming(
+        shared_state_->request->language(), shared_state_->request->code(),
+        shared_state_->request->stdin_data(), [state = shared_state_](absl::string_view o,
+                                                                     absl::string_view e) {
+          if (o.empty() && e.empty()) return;
           ExecutionLog log;
-          if (state->log_queue.Pop(log)) {
-            state->current_log = std::move(log);
-            if (state->state.compare_exchange_strong(current, ReactorState::kWriting)) {
-              state->reactor->StartWrite(&state->current_log);
+          if (!o.empty()) log.set_stdout_chunk(std::string(o));
+          if (!e.empty()) log.set_stderr_chunk(std::string(e));
+          state->log_queue.Push(std::move(log));
+          {
+            absl::MutexLock lock(&state->notify_mutex);
+            state->notification_pending = true;
+          }
+          state->notify_cv.Signal();
+        });
+
+    ExecutionResult final_res;
+    if (result.ok()) {
+      final_res = *result;
+    } else {
+      final_res.success = false;
+      final_res.error_message = std::string(result.status().message());
+    }
+
+    shared_state_->final_stats = final_res.stats;
+    shared_state_->cache_hit.store(final_res.cache_hit);
+    shared_state_->wall_clock_timeout.store(final_res.wall_clock_timeout);
+    shared_state_->output_truncated.store(final_res.output_truncated);
+
+    if (!final_res.success) {
+      std::string error_msg;
+      if (!final_res.error_message.empty()) {
+        absl::SubstituteAndAppend(&error_msg, "ERROR: $0\n", final_res.error_message);
+      }
+      if (!final_res.backend_trace.empty()) {
+        absl::SubstituteAndAppend(&error_msg, "$0\n", final_res.backend_trace);
+      }
+      if (!error_msg.empty()) {
+        ExecutionLog error_log;
+        error_log.set_stderr_chunk(error_msg);
+        shared_state_->log_queue.Push(std::move(error_log));
+      }
+    }
+    shared_state_->execution_finished.store(true);
+    {
+      absl::MutexLock lock(&shared_state_->notify_mutex);
+      shared_state_->notification_pending = true;
+    }
+    shared_state_->notify_cv.Signal();
+  }
+
+  void PumpWrites() {
+    while (true) {
+      {
+        absl::MutexLock lock(&shared_state_->notify_mutex);
+        shared_state_->notify_cv.Wait(&shared_state_->notify_mutex, [&] {
+          return shared_state_->notification_pending || shared_state_->reactor_done ||
+                 shared_state_->cancelled.load();
+        });
+        if (shared_state_->reactor_done ||
+            (shared_state_->cancelled.load() &&
+             shared_state_->state.load() == ReactorState::kIdle)) {
+          break;
+        }
+        shared_state_->notification_pending = false;
+      }
+
+      ReactorState current = shared_state_->state.load();
+      if (current == ReactorState::kIdle) {
+        ExecutionLog log;
+        if (shared_state_->log_queue.Pop(log)) {
+          shared_state_->current_log = std::move(log);
+          if (shared_state_->state.compare_exchange_strong(current,
+                                                           ReactorState::kWriting)) {
+            StartWrite(&shared_state_->current_log);
+          }
+        } else if (shared_state_->execution_finished.load()) {
+          if (!shared_state_->stats_sent.load()) {
+            ExecutionLog stats_log;
+            stats_log.set_peak_memory_bytes(shared_state_->final_stats.peak_memory_bytes);
+            stats_log.set_execution_time_ms(
+                static_cast<float>(shared_state_->final_stats.elapsed_time_ms));
+            stats_log.set_cache_hit(shared_state_->cache_hit.load());
+            stats_log.set_wall_clock_timeout(shared_state_->wall_clock_timeout.load());
+            stats_log.set_output_truncated(shared_state_->output_truncated.load());
+            shared_state_->current_log = std::move(stats_log);
+            shared_state_->stats_sent.store(true);
+            if (shared_state_->state.compare_exchange_strong(current,
+                                                             ReactorState::kWriting)) {
+              StartWrite(&shared_state_->current_log);
             }
-          } else if (state->execution_finished.load()) {
-            if (!state->stats_sent.load()) {
-              ExecutionLog stats_log;
-              stats_log.set_peak_memory_bytes(state->final_stats.peak_memory_bytes);
-              stats_log.set_execution_time_ms(static_cast<float>(state->final_stats.elapsed_time_ms));
-              stats_log.set_cache_hit(state->cache_hit.load());
-              stats_log.set_wall_clock_timeout(state->wall_clock_timeout.load());
-              stats_log.set_output_truncated(state->output_truncated.load());
-              state->current_log = std::move(stats_log);
-              state->stats_sent.store(true);
-              if (state->state.compare_exchange_strong(current, ReactorState::kWriting)) {
-                state->reactor->StartWrite(&state->current_log);
-              }
-            } else {
-              if (state->state.compare_exchange_strong(current, ReactorState::kFinishing)) {
-                state->reactor->Finish(Status::OK);
-              }
+          } else {
+            if (shared_state_->state.compare_exchange_strong(current,
+                                                             ReactorState::kFinishing)) {
+              Finish(Status::OK);
             }
           }
         }
-        if (state->state.load() == ReactorState::kFinishing) break;
       }
-    });
-    processor.detach();
+      if (shared_state_->state.load() == ReactorState::kFinishing) {
+        break;
+      }
+    }
   }
 
   void OnWriteDone(bool ok) override {
@@ -224,34 +356,51 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
     ReactorState expected = ReactorState::kWriting;
     shared_state_->state.compare_exchange_strong(expected, ReactorState::kIdle);
     {
-      std::lock_guard<std::mutex> lock(shared_state_->notify_mutex);
+      absl::MutexLock lock(&shared_state_->notify_mutex);
       shared_state_->notification_pending = true;
     }
-    shared_state_->notify_cv.notify_one();
+    shared_state_->notify_cv.Signal();
   }
 
   void OnDone() override {
     {
-      std::lock_guard<std::mutex> lock(shared_state_->notify_mutex);
+      absl::MutexLock lock(&shared_state_->notify_mutex);
       shared_state_->reactor_done = true;
     }
-    shared_state_->notify_cv.notify_all();
+    shared_state_->notify_cv.SignalAll();
     shared_state_->counter.fetch_sub(1);
-    delete this;
   }
 
   void OnCancel() override {
     shared_state_->cancelled.store(true);
     {
-      std::lock_guard<std::mutex> lock(shared_state_->notify_mutex);
+      absl::MutexLock lock(&shared_state_->notify_mutex);
       shared_state_->notification_pending = true;
     }
-    shared_state_->notify_cv.notify_one();
+    shared_state_->notify_cv.Signal();
   }
 
  private:
   std::shared_ptr<ReactorInternalState> shared_state_;
 };
+
+void WarmWorkerPool::Worker::Run() {
+  while (true) {
+    std::unique_ptr<ExecuteReactor> reactor;
+    {
+      absl::MutexLock lock(&mutex_);
+      cv_.Wait(&mutex_, [&] { return reactor_ != nullptr || stopping_; });
+      if (stopping_) {
+        break;
+      }
+      reactor = std::move(reactor_);
+    }
+    reactor->StartExecution();
+    reactor->PumpWrites();
+    pool_->NotifyWorkerIdle();
+    ClearActiveReactor();
+  }
+}
 
 class RejectReactor : public ServerWriteReactor<ExecutionLog> {
  public:
@@ -263,23 +412,41 @@ class RejectReactor : public ServerWriteReactor<ExecutionLog> {
 
 class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
  public:
-  CodeExecutorServiceImpl() : active_sandboxes_(0) {}
-  ServerWriteReactor<ExecutionLog>* Execute(CallbackServerContext* context, const CodeRequest* request) override {
+  explicit CodeExecutorServiceImpl(int max_sandboxes)
+      : active_sandboxes_(0),
+        worker_pool_(max_sandboxes) {
+    worker_pool_.Start();
+  }
+
+  ~CodeExecutorServiceImpl() override { worker_pool_.Shutdown(); }
+
+  ServerWriteReactor<ExecutionLog>* Execute(CallbackServerContext* context,
+                                           const CodeRequest* request) override {
     (void)context;
     if (active_sandboxes_.load() >= absl::GetFlag(FLAGS_max_concurrent_sandboxes)) {
       return new RejectReactor();
     }
-    return new ExecuteReactor(request, active_sandboxes_);
+    std::unique_ptr<ExecuteReactor> reactor =
+        std::make_unique<ExecuteReactor>(request, active_sandboxes_);
+    absl::StatusOr<ExecuteReactor*> assignment =
+        worker_pool_.AcquireWorker(std::move(reactor));
+    if (!assignment.ok()) {
+      LOG(WARNING) << "Worker pool rejected request: " << assignment.status();
+      return new RejectReactor();
+    }
+    return *assignment;
   }
+
  private:
   std::atomic<int> active_sandboxes_;
+  WarmWorkerPool worker_pool_;
 };
 
 }  // namespace
 
 absl::Status RunServer() {
   std::string server_address = absl::Substitute("0.0.0.0:$0", absl::GetFlag(FLAGS_port));
-  CodeExecutorServiceImpl service;
+  CodeExecutorServiceImpl service(absl::GetFlag(FLAGS_max_concurrent_sandboxes));
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
