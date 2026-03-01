@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "src/server/execution_cache.h"
+#include "src/common/execution_cache.h"
 
 #include <list>
 
