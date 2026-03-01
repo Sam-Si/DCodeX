@@ -17,9 +17,10 @@
 
 #include <grpcpp/alarm.h>
 
-#include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -28,8 +29,8 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
-#include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "src/server/execution_cache.h"
@@ -89,9 +90,9 @@ class ExecutionStep {
  public:
   virtual ~ExecutionStep() = default;
 
-  // Executes this step and returns true on success, false on failure.
+  // Executes this step and returns OK on success, or an error status on failure.
   // The context is passed by reference to allow steps to share state.
-  virtual bool Execute(ExecutionContext& context) = 0;
+  virtual absl::Status Execute(ExecutionContext& context) = 0;
 
   // Returns a descriptive name for this step (used in tracing/logging).
   virtual absl::string_view Name() const = 0;
@@ -131,8 +132,15 @@ class ExecutionContext {
   // Adds a path to be cleaned up when context is destroyed
   void AddCleanupPath(const std::string& path) { cleanup_paths.push_back(path); }
 
-  // Marks the execution as failed with an error message
-  void Fail(absl::string_view error) {
+  // Marks the execution as failed with an error message and returns an error status.
+  absl::Status Fail(absl::string_view error) {
+    result.success = false;
+    result.error_message = std::string(error);
+    return absl::InternalError(error);
+  }
+
+  // Sets an error on the result without returning (for non-fatal errors)
+  void SetError(absl::string_view error) {
     result.success = false;
     result.error_message = std::string(error);
   }
@@ -153,19 +161,24 @@ class ExecutionPipeline {
   }
 
   // Executes all steps in sequence. Stops on first failure.
-  // Returns the final execution result.
-  ExecutionResult Run(ExecutionContext& context) {
-    for (auto& step : steps_) {
-      context.trace << "[STEP] " << step->Name() << "\n";
-      if (!step->Execute(context)) {
-        context.trace << "[FAIL] Step '" << step->Name() << "' failed\n";
+  // Returns the final execution result or an error status.
+  absl::StatusOr<ExecutionResult> Run(ExecutionContext& context) {
+    for (const auto& step : steps_) {
+      context.trace << absl::StrFormat("[STEP] %s\n", step->Name());
+      absl::Status status = step->Execute(context);
+      if (!status.ok()) {
+        context.trace << absl::StrFormat("[FAIL] Step '%s' failed: %s\n",
+                                         step->Name(), status.message());
         if (context.result.error_message.empty()) {
           context.result.error_message =
-              absl::StrCat("Step '", step->Name(), "' failed");
+              absl::StrFormat("Step '%s' failed: %s", step->Name(),
+                              status.message());
         }
-        break;
+        context.result.backend_trace = context.trace.str();
+        return status;
       }
-      context.trace << "[OK] Step '" << step->Name() << "' completed\n";
+      context.trace << absl::StrFormat("[OK] Step '%s' completed\n",
+                                       step->Name());
     }
     context.result.backend_trace = context.trace.str();
     return context.result;
@@ -183,16 +196,16 @@ class ExecutionStrategy {
  public:
   virtual ~ExecutionStrategy() = default;
 
-  // Executes the given code and returns the result.
-  virtual ExecutionResult Execute(absl::string_view code,
-                                  absl::string_view stdin_data,
-                                  OutputCallback callback) = 0;
+  // Executes the given code and returns the result or an error status.
+  virtual absl::StatusOr<ExecutionResult> Execute(
+      absl::string_view code, absl::string_view stdin_data,
+      OutputCallback callback) = 0;
 
   // Returns a unique identifier for this strategy (used for caching).
   virtual absl::string_view GetStrategyId() const = 0;
 
   // Factory method to create an execution strategy based on file extension or language.
-  static std::unique_ptr<ExecutionStrategy> Create(
+  static absl::StatusOr<std::unique_ptr<ExecutionStrategy>> Create(
       absl::string_view filename_or_extension);
 
  protected:
@@ -212,8 +225,9 @@ class CompiledLanguageStrategy : public ExecutionStrategy {
   explicit CompiledLanguageStrategy(Language language) : language_(language) {}
   ~CompiledLanguageStrategy() override = default;
 
-  ExecutionResult Execute(absl::string_view code, absl::string_view stdin_data,
-                          OutputCallback callback) override;
+  absl::StatusOr<ExecutionResult> Execute(
+      absl::string_view code, absl::string_view stdin_data,
+      OutputCallback callback) override;
 
   absl::string_view GetStrategyId() const override {
     return language_ == Language::kC ? "c" : "cpp";
@@ -224,19 +238,19 @@ class CompiledLanguageStrategy : public ExecutionStrategy {
 
  private:
   Language language_;
-  
-  // Returns the file extension for this language
-  absl::string_view GetExtension() const {
+
+  // Returns the file extension for this language.
+  [[nodiscard]] absl::string_view GetExtension() const {
     return language_ == Language::kC ? ".c" : ".cpp";
   }
-  
-  // Returns the compiler name for this language
-  absl::string_view GetCompiler() const {
+
+  // Returns the compiler name for this language.
+  [[nodiscard]] absl::string_view GetCompiler() const {
     return language_ == Language::kC ? "clang" : "clang++";
   }
-  
-  // Returns the standard flag for this language
-  std::vector<std::string> GetStandardFlags() const {
+
+  // Returns the standard flags for this language.
+  [[nodiscard]] std::vector<std::string> GetStandardFlags() const {
     if (language_ == Language::kC) {
       return {"-std=c11", "-Wall"};
     }
@@ -258,8 +272,9 @@ class PythonExecutionStrategy : public ExecutionStrategy {
   PythonExecutionStrategy() = default;
   ~PythonExecutionStrategy() override = default;
 
-  ExecutionResult Execute(absl::string_view code, absl::string_view stdin_data,
-                          OutputCallback callback) override;
+  absl::StatusOr<ExecutionResult> Execute(
+      absl::string_view code, absl::string_view stdin_data,
+      OutputCallback callback) override;
 
   absl::string_view GetStrategyId() const override { return "python"; }
 
@@ -279,7 +294,7 @@ class CreateSourceFileStep : public ExecutionStep {
   explicit CreateSourceFileStep(absl::string_view extension)
       : extension_(extension) {}
 
-  bool Execute(ExecutionContext& context) override;
+  absl::Status Execute(ExecutionContext& context) override;
   absl::string_view Name() const override { return "CreateSourceFile"; }
 
  private:
@@ -295,7 +310,7 @@ class CompileStep : public ExecutionStep {
       : compiler_(compiler),
         compiler_flags_(std::move(compiler_flags)) {}
 
-  bool Execute(ExecutionContext& context) override;
+  absl::Status Execute(ExecutionContext& context) override;
   absl::string_view Name() const override { return "Compile"; }
 
  private:
@@ -309,7 +324,7 @@ class RunProcessStep : public ExecutionStep {
  public:
   explicit RunProcessStep(bool sandboxed) : sandboxed_(sandboxed) {}
 
-  bool Execute(ExecutionContext& context) override;
+  absl::Status Execute(ExecutionContext& context) override;
   absl::string_view Name() const override { return "RunProcess"; }
 
  private:
@@ -323,7 +338,7 @@ class FinalizeResultStep : public ExecutionStep {
   explicit FinalizeResultStep(absl::string_view context_name)
       : context_name_(context_name) {}
 
-  bool Execute(ExecutionContext& context) override;
+  absl::Status Execute(ExecutionContext& context) override;
   absl::string_view Name() const override { return "FinalizeResult"; }
 
  private:
@@ -339,7 +354,7 @@ class FinalizeResultStep : public ExecutionStep {
 // 1. Resource Efficiency: No extra process forked for each timeout
 // 2. Integration: Works seamlessly with gRPC's async completion queue
 // 3. Cancellation: Supports graceful cancellation via callback
-// 4. Thread Safety: Uses absl::Mutex for thread-safe state access
+// 4. Thread Safety: Uses std::mutex for thread-safe state access
 // 
 // Benefits of gRPC Alarm over fork-based approach:
 // - Eliminates process table pollution (no zombie processes)
@@ -367,30 +382,24 @@ class ProcessTimeoutManager {
   void Cancel();
 
   // Checks if the timeout has been triggered.
-  bool IsTriggered() const;
+  [[nodiscard]] bool IsTriggered() const;
 
   // Checks if the timeout was cancelled before triggering.
-  bool IsCancelled() const;
+  [[nodiscard]] bool IsCancelled() const;
 
  private:
   void OnAlarmTriggered(bool ok);
 
-  pid_t pid_;
   absl::Duration timeout_;
   TimeoutCallback callback_;
-  grpc::Alarm alarm_;
-  
-  mutable absl::Mutex mutex_;
-  bool started_ ABSL_GUARDED_BY(mutex_) = false;
-  bool triggered_ ABSL_GUARDED_BY(mutex_) = false;
-  bool cancelled_ ABSL_GUARDED_BY(mutex_) = false;
+  std::shared_ptr<struct ProcessTimeoutState> state_;
 };
 
 // Orchestrator class that manages sandboxed execution and caching.
 class SandboxedProcess {
  public:
   // Compiles and runs code with caching support.
-  [[nodiscard]] static ExecutionResult CompileAndRunStreaming(
+  [[nodiscard]] static absl::StatusOr<ExecutionResult> CompileAndRunStreaming(
       absl::string_view filename_or_extension, absl::string_view code,
       absl::string_view stdin_data, OutputCallback callback);
 

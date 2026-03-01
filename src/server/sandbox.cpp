@@ -25,6 +25,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -78,66 +79,127 @@ ResourceStats ComputeResourceStats(const struct rusage& usage,
 // Handles low-level process execution with sandboxing support.
 // Now uses gRPC Alarm for timeout instead of fork-based watcher.
 // -----------------------------------------------------------------------------
-ExecutionResult RunCommandWithSandbox(absl::string_view context,
-                                      const std::vector<std::string>& argv,
-                                      absl::string_view input, bool sandboxed,
-                                      OutputCallback callback,
-                                      std::stringstream& trace) {
-  std::string cmd_str = absl::StrJoin(argv, " ");
-  // Using ANSI colors for backend trace
-  const char* color_tag =
-      sandboxed ? "\033[94m[SANDBOX]\033[0m " : "\033[92m[LOCAL]\033[0m ";
-  trace << color_tag << context << ": " << cmd_str << "\n";
+
+// Formats the command trace with appropriate coloring.
+void FormatCommandTrace(std::stringstream& trace, bool sandboxed,
+                        absl::string_view context,
+                        absl::string_view cmd_str) {
+  trace << (sandboxed ? "\033[94m[SANDBOX]\033[0m " : "\033[92m[LOCAL]\033[0m ")
+        << context << ": " << cmd_str << "\n";
+}
+
+// Creates pipe pairs for stdin, stdout, and stderr.
+absl::Status CreatePipes(PipePair& stdin_p, PipePair& stdout_p,
+                         PipePair& stderr_p, std::stringstream& trace) {
+  if (!stdin_p.Create() || !stdout_p.Create() || !stderr_p.Create()) {
+    trace << "[FAIL] Pipe creation failed\n";
+    return absl::InternalError("Pipe creation failed");
+  }
+  return absl::OkStatus();
+}
+
+// Writes input data to the stdin pipe.
+void FeedStdin(PipePair& stdin_p, absl::string_view input,
+               std::stringstream& trace) {
+  if (!input.empty()) {
+    trace << absl::StrFormat("[INFO] Feeding %zu bytes to stdin\n", input.size());
+    write(stdin_p.WriteFd(), input.data(), input.size());
+  }
+  stdin_p.CloseWrite();
+}
+
+// Formats the process exit error message.
+std::string FormatProcessError(int status) {
+  if (WIFEXITED(status)) {
+    return absl::StrFormat("Process exited with non-zero status: %d",
+                           WEXITSTATUS(status));
+  }
+  if (WIFSIGNALED(status)) {
+    return absl::StrFormat("Process killed by signal: %d", WTERMSIG(status));
+  }
+  return "Process failed for unknown reasons";
+}
+
+// Builds the execution result from process status and resource usage.
+ExecutionResult BuildExecutionResult(int status, const struct rusage& usage,
+                                     absl::Time start, bool timed_out,
+                                     bool truncated) {
+  ExecutionResult res;
+  res.stats = ComputeResourceStats(usage, start, absl::Now());
+  res.wall_clock_timeout = timed_out;
+  res.output_truncated = truncated;
+  res.success = !truncated && !timed_out && WIFEXITED(status) &&
+                WEXITSTATUS(status) == 0;
+
+  if (timed_out) {
+    res.error_message = "Wall-clock timeout exceeded";
+  } else if (truncated) {
+    res.error_message = "Output truncated";
+  } else if (!res.success) {
+    res.error_message = FormatProcessError(status);
+  }
+  return res;
+}
+
+absl::StatusOr<ExecutionResult> RunCommandWithSandbox(
+    absl::string_view context, const std::vector<std::string>& argv,
+    absl::string_view input, bool sandboxed, OutputCallback callback,
+    std::stringstream& trace) {
+  const std::string cmd_str = absl::StrJoin(argv, " ");
+  FormatCommandTrace(trace, sandboxed, context, cmd_str);
   LOG(INFO) << (sandboxed ? "Sandboxed" : "Local") << " exec: " << cmd_str;
 
   PipePair stdin_p, stdout_p, stderr_p;
-  if (!stdin_p.Create() || !stdout_p.Create() || !stderr_p.Create()) {
-    trace << "[FAIL] Pipe creation failed\n";
-    return ExecutionResult{false, "Pipe creation failed"};
+  absl::Status pipe_status = CreatePipes(stdin_p, stdout_p, stderr_p, trace);
+  if (!pipe_status.ok()) {
+    return pipe_status;
   }
 
-  absl::Time start = absl::Now();
-  pid_t pid = fork();
-  if (pid == 0) {
-    ProcessRunner::RedirectAndExec(absl::MakeSpan(argv), stdin_p.ReadFd(),
-                                   stdout_p.WriteFd(), stderr_p.WriteFd(),
-                                   sandboxed);
+  const absl::Time start = absl::Now();
+  
+  // Use posix_spawn for efficient process creation
+  absl::StatusOr<pid_t> spawn_result = ProcessRunner::SpawnProcess(
+      absl::MakeSpan(argv),
+      stdin_p.ReadFd(),
+      stdout_p.WriteFd(),
+      stderr_p.WriteFd(),
+      sandboxed);
+  
+  if (!spawn_result.ok()) {
+    trace << "[FAIL] Failed to spawn process: " << spawn_result.status().message() << "\n";
+    return spawn_result.status();
   }
+  
+  const pid_t pid = *spawn_result;
 
   stdin_p.CloseRead();
   stdout_p.CloseWrite();
   stderr_p.CloseWrite();
-  if (!input.empty()) {
-    trace << "[INFO] Feeding " << input.size() << " bytes to stdin\n";
-    write(stdin_p.WriteFd(), input.data(), input.size());
-  }
-  stdin_p.CloseWrite();
+  FeedStdin(stdin_p, input, trace);
 
   // Use gRPC Alarm-based timeout manager instead of fork-based watcher
   std::atomic<bool> timed_out_flag{false};
   std::unique_ptr<ProcessTimeoutManager> timeout_manager;
-  
+
   if (sandboxed) {
-    absl::Duration timeout = absl::Seconds(
+    const absl::Duration timeout = absl::Seconds(
         absl::GetFlag(FLAGS_sandbox_wall_clock_timeout_seconds));
     timeout_manager = std::make_unique<ProcessTimeoutManager>(
         pid, timeout, [&timed_out_flag, pid]() {
           timed_out_flag.store(true);
-          // Kill the process if still running
           if (kill(pid, 0) == 0) {
             kill(pid, SIGKILL);
           }
         });
     timeout_manager->Start();
-    trace << "[INFO] gRPC Alarm timeout armed for " 
-          << absl::ToInt64Seconds(timeout) << " seconds\n";
+    trace << absl::StrFormat("[INFO] gRPC Alarm timeout armed for %ld seconds\n",
+                             absl::ToInt64Seconds(timeout));
   }
 
   bool truncated = false;
   ProcessRunner::ReadOutput(stdout_p.ReadFd(), stderr_p.ReadFd(), pid, callback,
                             truncated);
 
-  // Cancel timeout if process finished before alarm
   if (timeout_manager) {
     timeout_manager->Cancel();
   }
@@ -146,53 +208,46 @@ ExecutionResult RunCommandWithSandbox(absl::string_view context,
   struct rusage usage {};
   wait4(pid, &status, 0, &usage);
 
-  bool timed_out = timed_out_flag.load();
-
-  ExecutionResult res;
-  res.stats = ComputeResourceStats(usage, start, absl::Now());
-  res.wall_clock_timeout = timed_out;
-  res.output_truncated = truncated;
-  res.success =
-      !truncated && !timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-
-  if (timed_out) {
-    res.error_message = "Wall-clock timeout exceeded";
-  } else if (truncated) {
-    res.error_message = "Output truncated";
-  } else if (!res.success) {
-    if (WIFEXITED(status)) {
-      res.error_message = absl::StrCat(
-          "Process exited with non-zero status: ", WEXITSTATUS(status));
-    } else if (WIFSIGNALED(status)) {
-      res.error_message =
-          absl::StrCat("Process killed by signal: ", WTERMSIG(status));
-    } else {
-      res.error_message = "Process failed for unknown reasons";
-    }
-  }
-  return res;
+  return BuildExecutionResult(status, usage, start, timed_out_flag.load(),
+                              truncated);
 }
 
-ExecutionResult HandleExecutionResult(absl::string_view context,
-                                      ExecutionResult res,
-                                      std::stringstream& trace) {
+// Formats the result trace with appropriate coloring based on status.
+void FormatResultTrace(std::stringstream& trace, absl::string_view context,
+                       const ExecutionResult& res) {
+  if (res.wall_clock_timeout) {
+    trace << absl::StrFormat("\033[91m[TIMEOUT]\033[0m %s: %s\n", context,
+                             res.error_message);
+  } else if (res.output_truncated) {
+    trace << absl::StrFormat("\033[93m[LIMIT]\033[0m %s: %s\n", context,
+                             res.error_message);
+  } else if (!res.success) {
+    trace << absl::StrFormat("\033[91m[ERROR]\033[0m %s: %s\n", context,
+                             res.error_message);
+  } else {
+    trace << absl::StrFormat("\033[92m[OK]\033[0m %s finished successfully\n",
+                             context);
+  }
+
+  const long cpu_time_ms = res.stats.user_time_ms + res.stats.system_time_ms;
+  trace << absl::StrFormat(
+      "    Resources: \033[1mCPU time\033[0m=\033[92m%ldms\033[0m, "
+      "\033[1mMemory\033[0m=\033[95m%ldKB\033[0m\n",
+      cpu_time_ms, res.stats.peak_memory_bytes / 1024);
+}
+
+absl::StatusOr<ExecutionResult> HandleExecutionResult(
+    absl::string_view context, ExecutionResult res,
+    std::stringstream& trace) {
   if (res.wall_clock_timeout) {
     res.error_message = "Wall-clock timeout exceeded";
-    trace << "\033[91m[TIMEOUT]\033[0m " << context << ": " << res.error_message << "\n";
   } else if (res.output_truncated) {
     res.error_message = "Output truncated";
-    trace << "\033[93m[LIMIT]\033[0m " << context << ": " << res.error_message << "\n";
-  } else if (!res.success) {
-    if (res.error_message.empty()) {
-      res.error_message = "Process failed";
-    }
-    trace << "\033[91m[ERROR]\033[0m " << context << ": " << res.error_message << "\n";
-  } else {
-    trace << "\033[92m[OK]\033[0m " << context << " finished successfully\n";
+  } else if (!res.success && res.error_message.empty()) {
+    res.error_message = "Process failed";
   }
-  trace << "    Resources: \033[1mCPU time\033[0m=\033[92m"
-        << res.stats.user_time_ms + res.stats.system_time_ms
-        << "ms\033[0m, \033[1mMemory\033[0m=\033[95m" << res.stats.peak_memory_bytes / 1024 << "KB\033[0m\n";
+
+  FormatResultTrace(trace, context, res);
   res.backend_trace = trace.str();
   return res;
 }
@@ -203,78 +258,96 @@ ExecutionResult HandleExecutionResult(absl::string_view context,
 // ProcessTimeoutManager Implementation
 // -----------------------------------------------------------------------------
 
+struct ProcessTimeoutState {
+  ProcessTimeoutState(absl::Duration timeout, ProcessTimeoutManager::TimeoutCallback callback)
+      : timeout(timeout), callback(std::move(callback)) {}
+
+  absl::Duration timeout;
+  ProcessTimeoutManager::TimeoutCallback callback;
+  grpc::Alarm alarm;
+  std::mutex mutex;
+  bool started = false;
+  bool triggered = false;
+  bool cancelled = false;
+};
+
 ProcessTimeoutManager::ProcessTimeoutManager(pid_t pid, absl::Duration timeout,
                                              TimeoutCallback callback)
-    : pid_(pid), timeout_(timeout), callback_(std::move(callback)) {}
+    : timeout_(timeout), callback_(std::move(callback)) {
+  (void)pid;
+  state_ = std::make_shared<ProcessTimeoutState>(timeout, std::move(callback_));
+}
 
 ProcessTimeoutManager::~ProcessTimeoutManager() { Cancel(); }
 
 void ProcessTimeoutManager::Start() {
-  absl::MutexLock lock(&mutex_);
-  if (started_ || cancelled_) {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (state_->started || state_->cancelled) {
     return;
   }
-  started_ = true;
+  state_->started = true;
 
-  // Calculate deadline from current time
-  auto deadline = absl::ToChronoTime(absl::Now() + timeout_);
+  auto deadline = absl::ToChronoTime(absl::Now() + state_->timeout);
   
-  // Set the gRPC Alarm with a callback
-  alarm_.Set(deadline, [this](bool ok) { OnAlarmTriggered(ok); });
+  state_->alarm.Set(deadline, [state = state_](bool ok) {
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      if (state->cancelled || !ok) {
+        return;
+      }
+      state->triggered = true;
+    }
+    if (state->callback) {
+      state->callback();
+    }
+  });
 }
 
 void ProcessTimeoutManager::Cancel() {
-  absl::MutexLock lock(&mutex_);
-  if (cancelled_ || triggered_) {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (state_->cancelled || state_->triggered) {
     return;
   }
-  cancelled_ = true;
-  alarm_.Cancel();
+  state_->cancelled = true;
+  state_->alarm.Cancel();
 }
 
 bool ProcessTimeoutManager::IsTriggered() const {
-  absl::MutexLock lock(&mutex_);
-  return triggered_;
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return state_->triggered;
 }
 
 bool ProcessTimeoutManager::IsCancelled() const {
-  absl::MutexLock lock(&mutex_);
-  return cancelled_;
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return state_->cancelled;
 }
 
 void ProcessTimeoutManager::OnAlarmTriggered(bool ok) {
-  absl::MutexLock lock(&mutex_);
-  if (cancelled_) {
-    return;
-  }
-  
-  if (ok) {
-    // Alarm fired (timeout occurred)
-    triggered_ = true;
-    if (callback_) {
-      callback_();
-    }
-  }
-  // If !ok, the alarm was cancelled
+  // This is no longer used as we use a lambda in Start()
+  (void)ok;
 }
 
 // -----------------------------------------------------------------------------
 // Concrete Execution Steps Implementation
 // -----------------------------------------------------------------------------
 
-bool CreateSourceFileStep::Execute(ExecutionContext& context) {
-  context.source_file_path = TempFileManager::WriteTempFile(extension_, context.code);
-  if (context.source_file_path.empty()) {
-    context.trace << "[FAIL] Failed to create source file\n";
-    context.Fail("Failed to create source file");
-    return false;
+absl::Status CreateSourceFileStep::Execute(ExecutionContext& context) {
+  absl::StatusOr<std::string> path_result =
+      TempFileManager::WriteTempFile(extension_, context.code);
+  if (!path_result.ok()) {
+    context.trace << "[FAIL] Failed to create source file: "
+                  << path_result.status().message() << "\n";
+    return context.Fail(absl::StrCat("Failed to create source file: ",
+                                     path_result.status().message()));
   }
-  context.trace << "[OK] Created source file: " << context.source_file_path << "\n";
+  context.source_file_path = std::move(*path_result);
+  context.trace << "[OK] Created source file: " << context.source_file_path
+                << "\n";
   context.AddCleanupPath(context.source_file_path);
-  return true;
+  return absl::OkStatus();
 }
 
-bool CompileStep::Execute(ExecutionContext& context) {
+absl::Status CompileStep::Execute(ExecutionContext& context) {
   // Build the compile command
   std::vector<std::string> argv = {compiler_};
   for (const auto& flag : compiler_flags_) {
@@ -291,28 +364,47 @@ bool CompileStep::Execute(ExecutionContext& context) {
 
   // First compile attempt (null callback to suppress output)
   auto null_cb = [](absl::string_view, absl::string_view) {};
-  ExecutionResult comp_res = RunCommandWithSandbox(
+  absl::StatusOr<ExecutionResult> comp_res = RunCommandWithSandbox(
       "Compile", argv, "", false, null_cb, context.trace);
-  comp_res = HandleExecutionResult("Compile", comp_res, context.trace);
-
-  if (!comp_res.success) {
-    context.trace << "[FAIL] Compilation failed - capturing detailed errors\n";
-    // Re-run with actual callback to capture error output
-    ExecutionResult err_res = RunCommandWithSandbox(
-        "Compile", argv, "", false, context.callback, context.trace);
-    err_res = HandleExecutionResult("Compile", err_res, context.trace);
-    if (err_res.error_message.empty()) {
-      err_res.error_message = "Compilation failed";
-    }
-    context.result = err_res;
-    return false;
+  if (!comp_res.ok()) {
+    return comp_res.status();
+  }
+  
+  absl::StatusOr<ExecutionResult> handled_res =
+      HandleExecutionResult("Compile", *comp_res, context.trace);
+  if (!handled_res.ok()) {
+    return handled_res.status();
   }
 
-  context.result = comp_res;
-  return true;
+  if (!handled_res->success) {
+    context.trace << "[FAIL] Compilation failed - capturing detailed errors\n";
+    // Re-run with actual callback to capture error output
+    absl::StatusOr<ExecutionResult> err_res = RunCommandWithSandbox(
+        "Compile", argv, "", false, context.callback, context.trace);
+    if (!err_res.ok()) {
+      return err_res.status();
+    }
+    
+    absl::StatusOr<ExecutionResult> handled_err =
+        HandleExecutionResult("Compile", *err_res, context.trace);
+    if (!handled_err.ok()) {
+      return handled_err.status();
+    }
+    
+    if (handled_err->error_message.empty()) {
+      context.SetError("Compilation failed");
+    } else {
+      context.SetError(handled_err->error_message);
+    }
+    context.result = *handled_err;
+    return absl::InternalError(context.result.error_message);
+  }
+
+  context.result = *handled_res;
+  return absl::OkStatus();
 }
 
-bool RunProcessStep::Execute(ExecutionContext& context) {
+absl::Status RunProcessStep::Execute(ExecutionContext& context) {
   std::vector<std::string> argv;
   
   // Determine what to run based on binary_path
@@ -330,25 +422,39 @@ bool RunProcessStep::Execute(ExecutionContext& context) {
     }
   }
 
-  ExecutionResult run_res = RunCommandWithSandbox(
-      "Run", argv, context.stdin_data, sandboxed_, context.callback, context.trace);
-  context.result = HandleExecutionResult("Run", run_res, context.trace);
-  return context.result.success;
+  absl::StatusOr<ExecutionResult> run_res = RunCommandWithSandbox(
+      "Run", argv, context.stdin_data, sandboxed_, context.callback,
+      context.trace);
+  if (!run_res.ok()) {
+    return run_res.status();
+  }
+  
+  absl::StatusOr<ExecutionResult> handled_res =
+      HandleExecutionResult("Run", *run_res, context.trace);
+  if (!handled_res.ok()) {
+    return handled_res.status();
+  }
+  
+  context.result = *handled_res;
+  if (!context.result.success) {
+    return absl::InternalError(context.result.error_message);
+  }
+  return absl::OkStatus();
 }
 
-bool FinalizeResultStep::Execute(ExecutionContext& context) {
+absl::Status FinalizeResultStep::Execute(ExecutionContext& context) {
   // Ensure trace is captured in result
   context.result.backend_trace = context.trace.str();
-  return context.result.success;
+  return absl::OkStatus();
 }
 
 // -----------------------------------------------------------------------------
 // CompiledLanguageStrategy Implementation
 // Supports both C and C++ compilation with appropriate compiler selection.
 // -----------------------------------------------------------------------------
-ExecutionResult CompiledLanguageStrategy::Execute(absl::string_view code,
-                                                  absl::string_view stdin_data,
-                                                  OutputCallback callback) {
+absl::StatusOr<ExecutionResult> CompiledLanguageStrategy::Execute(
+    absl::string_view code, absl::string_view stdin_data,
+    OutputCallback callback) {
   ExecutionContext context(code, stdin_data, std::move(callback));
   
   auto pipeline = CreatePipeline();
@@ -368,9 +474,9 @@ std::unique_ptr<ExecutionPipeline> CompiledLanguageStrategy::CreatePipeline() {
 // -----------------------------------------------------------------------------
 // PythonExecutionStrategy Implementation
 // -----------------------------------------------------------------------------
-ExecutionResult PythonExecutionStrategy::Execute(absl::string_view code,
-                                                 absl::string_view stdin_data,
-                                                 OutputCallback callback) {
+absl::StatusOr<ExecutionResult> PythonExecutionStrategy::Execute(
+    absl::string_view code, absl::string_view stdin_data,
+    OutputCallback callback) {
   ExecutionContext context(code, stdin_data, std::move(callback));
   
   auto pipeline = CreatePipeline();
@@ -386,7 +492,7 @@ std::unique_ptr<ExecutionPipeline> PythonExecutionStrategy::CreatePipeline() {
 }
 
 // --- ExecutionStrategy Factory ---
-std::unique_ptr<ExecutionStrategy> ExecutionStrategy::Create(
+absl::StatusOr<std::unique_ptr<ExecutionStrategy>> ExecutionStrategy::Create(
     absl::string_view filename_or_extension) {
   // Check for Python
   if (absl::EndsWith(filename_or_extension, ".py") ||
@@ -410,14 +516,20 @@ std::unique_ptr<ExecutionStrategy> ExecutionStrategy::Create(
 ExecutionCache& SandboxedProcess::GetCache() { return CacheHolder::Get(); }
 void SandboxedProcess::ClearCache() { CacheHolder::Get().Clear(); }
 
-ExecutionResult SandboxedProcess::CompileAndRunStreaming(
+absl::StatusOr<ExecutionResult> SandboxedProcess::CompileAndRunStreaming(
     absl::string_view filename_or_extension, absl::string_view code,
     absl::string_view stdin_data, OutputCallback callback) {
-  auto strategy = ExecutionStrategy::Create(filename_or_extension);
+  absl::StatusOr<std::unique_ptr<ExecutionStrategy>> strategy_result =
+      ExecutionStrategy::Create(filename_or_extension);
+  if (!strategy_result.ok()) {
+    return strategy_result.status();
+  }
+  
+  std::unique_ptr<ExecutionStrategy>& strategy = *strategy_result;
 
   std::string cache_input = absl::StrCat(strategy->GetStrategyId(), ":", code,
                                         "\0", stdin_data);
-  auto hash_res = ExecutionCache::ComputeHash(cache_input);
+  absl::StatusOr<std::string> hash_res = ExecutionCache::ComputeHash(cache_input);
 
   if (hash_res.ok()) {
     auto cached = GetCache().Get(hash_res.value());
@@ -449,16 +561,21 @@ ExecutionResult SandboxedProcess::CompileAndRunStreaming(
     callback(o, e);
   };
 
-  ExecutionResult result = strategy->Execute(code, stdin_data, wrapped_cb);
+  absl::StatusOr<ExecutionResult> result =
+      strategy->Execute(code, stdin_data, wrapped_cb);
 
-  if (result.success && hash_res.ok()) {
+  if (!result.ok()) {
+    return result;
+  }
+
+  if (result->success && hash_res.ok()) {
     CachedResult cr;
     cr.stdout_output = buffer.out;
     cr.stderr_output = buffer.err;
-    cr.peak_memory_bytes = result.stats.peak_memory_bytes;
-    cr.execution_time_ms = static_cast<float>(result.stats.elapsed_time_ms);
-    cr.success = result.success;
-    cr.error_message = result.error_message;
+    cr.peak_memory_bytes = result->stats.peak_memory_bytes;
+    cr.execution_time_ms = static_cast<float>(result->stats.elapsed_time_ms);
+    cr.success = result->success;
+    cr.error_message = result->error_message;
     GetCache().Put(hash_res.value(), cr);
   }
 

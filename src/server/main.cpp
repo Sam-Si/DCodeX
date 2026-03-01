@@ -15,7 +15,9 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <thread>
 
@@ -24,7 +26,8 @@
 #include "absl/log/initialize.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/synchronization/mutex.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/substitute.h"
 #include "proto/sandbox.grpc.pb.h"
 #include "src/server/sandbox.h"
 
@@ -43,256 +46,245 @@ namespace dcodex {
 
 namespace {
 
-// Helper class to manage execution reactor state and output buffering.
-class ExecutionReactorState {
- public:
-  ExecutionReactorState() = default;
-
-  // Queues an execution log entry.
-  void QueueLog(const ExecutionLog& log) { queue_.push(log); }
-
-  // Checks if there are pending logs to write.
-  bool HasPendingLogs() const { return !queue_.empty(); }
-
-  // Gets the next log from the queue.
-  ExecutionLog GetNextLog() {
-    ExecutionLog log = queue_.front();
-    queue_.pop();
-    return log;
-  }
-
-  // Marks execution as finished.
-  void MarkFinished() { finished_ = true; }
-
-  // Checks if execution is finished.
-  bool IsFinished() const { return finished_; }
-
-  // Marks stats as sent.
-  void MarkStatsSent() { stats_sent_ = true; }
-
-  // Checks if stats have been sent.
-  bool AreStatsSent() const { return stats_sent_; }
-
-  // Gets the writing flag.
-  bool IsWriting() const { return writing_; }
-
-  // Sets the writing flag.
-  void SetWriting(bool writing) { writing_ = writing; }
-
-  // Sets resource statistics.
-  void SetStats(const ResourceStats& stats) { stats_ = stats; }
-
-  // Gets resource statistics.
-  const ResourceStats& GetStats() const { return stats_; }
-
-  // Sets cache hit flag.
-  void SetCacheHit(bool cache_hit) { cache_hit_ = cache_hit; }
-
-  // Gets cache hit flag.
-  bool IsCacheHit() const { return cache_hit_; }
-
-  // Sets wall-clock timeout flag.
-  void SetWallClockTimeout(bool timed_out) { wall_clock_timeout_ = timed_out; }
-
-  // Gets wall-clock timeout flag.
-  bool IsWallClockTimeout() const { return wall_clock_timeout_; }
-
-  // Sets output truncated flag.
-  void SetOutputTruncated(bool truncated) { output_truncated_ = truncated; }
-
-  // Gets output truncated flag.
-  bool IsOutputTruncated() const { return output_truncated_; }
-
- private:
-  std::queue<ExecutionLog> queue_;
-  bool finished_ = false;
-  bool writing_ = false;
-  bool stats_sent_ = false;
-  bool cache_hit_ = false;
-  bool wall_clock_timeout_ = false;
-  bool output_truncated_ = false;
-  ResourceStats stats_;
+// Reactor state enumeration
+enum class ReactorState {
+  kIdle,
+  kWriting,
+  kFinishing,
+  kFinished,
 };
 
-// Handles rejection when too many sandboxes are active.
+// Thread-safe log queue
+class ThreadSafeLogQueue {
+ public:
+  void Push(const ExecutionLog& log) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push(log);
+  }
+
+  bool Pop(ExecutionLog& log) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty()) return false;
+    log = std::move(queue_.front());
+    queue_.pop();
+    return true;
+  }
+
+  bool Empty() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.empty();
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::queue<ExecutionLog> queue_;
+};
+
+// Forward declaration
+class ExecuteReactor;
+
+// Internal state of the reactor, shared between threads
+struct ReactorInternalState {
+  ReactorInternalState(const CodeRequest* req, std::atomic<int>& c, ExecuteReactor* r)
+      : request(req), counter(c), reactor(r), state(ReactorState::kIdle) {}
+
+  const CodeRequest* request;
+  std::atomic<int>& counter;
+  ExecuteReactor* reactor; // Raw pointer to reactor, only used by processor thread
+
+  std::atomic<ReactorState> state;
+  std::atomic<bool> execution_finished{false};
+  std::atomic<bool> stats_sent{false};
+  std::atomic<bool> cache_hit{false};
+  std::atomic<bool> wall_clock_timeout{false};
+  std::atomic<bool> output_truncated{false};
+  std::atomic<bool> cancelled{false};
+  
+  std::mutex notify_mutex;
+  std::condition_variable notify_cv;
+  bool notification_pending = false;
+  bool reactor_done = false;
+
+  ThreadSafeLogQueue log_queue;
+  ExecutionLog current_log;
+  ResourceStats final_stats;
+};
+
+class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
+ public:
+  ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter)
+      : shared_state_(std::make_shared<ReactorInternalState>(request, counter, this)) {
+    shared_state_->counter.fetch_add(1);
+    
+    // Start processor thread
+    std::thread processor([state = shared_state_]() {
+      // Start worker thread
+      std::thread worker([state]() {
+        absl::StatusOr<ExecutionResult> result = SandboxedProcess::CompileAndRunStreaming(
+            state->request->language(), state->request->code(), state->request->stdin_data(),
+            [state](absl::string_view o, absl::string_view e) {
+              if (o.empty() && e.empty()) return;
+              ExecutionLog log;
+              if (!o.empty()) log.set_stdout_chunk(std::string(o));
+              if (!e.empty()) log.set_stderr_chunk(std::string(e));
+              state->log_queue.Push(std::move(log));
+              {
+                std::lock_guard<std::mutex> lock(state->notify_mutex);
+                state->notification_pending = true;
+              }
+              state->notify_cv.notify_one();
+            });
+
+        ExecutionResult final_res;
+        if (result.ok()) {
+          final_res = *result;
+        } else {
+          final_res.success = false;
+          final_res.error_message = std::string(result.status().message());
+        }
+
+        // Handle completion
+        state->final_stats = final_res.stats;
+        state->cache_hit.store(final_res.cache_hit);
+        state->wall_clock_timeout.store(final_res.wall_clock_timeout);
+        state->output_truncated.store(final_res.output_truncated);
+
+        if (!final_res.success) {
+          std::string error_msg;
+          if (!final_res.error_message.empty()) {
+            absl::SubstituteAndAppend(&error_msg, "ERROR: $0\n", final_res.error_message);
+          }
+          if (!final_res.backend_trace.empty()) {
+            absl::SubstituteAndAppend(&error_msg, "$0\n", final_res.backend_trace);
+          }
+          if (!error_msg.empty()) {
+            ExecutionLog error_log;
+            error_log.set_stderr_chunk(error_msg);
+            state->log_queue.Push(std::move(error_log));
+          }
+        }
+        state->execution_finished.store(true);
+        {
+          std::lock_guard<std::mutex> lock(state->notify_mutex);
+          state->notification_pending = true;
+        }
+        state->notify_cv.notify_one();
+      });
+      worker.detach();
+
+      while (true) {
+        {
+          std::unique_lock<std::mutex> lock(state->notify_mutex);
+          state->notify_cv.wait(lock, [&] {
+            return state->notification_pending || state->reactor_done || state->cancelled.load();
+          });
+          if (state->reactor_done || (state->cancelled.load() && state->state.load() == ReactorState::kIdle)) {
+            break;
+          }
+          state->notification_pending = false;
+        }
+
+        // Process state
+        ReactorState current = state->state.load();
+        if (current == ReactorState::kIdle) {
+          ExecutionLog log;
+          if (state->log_queue.Pop(log)) {
+            state->current_log = std::move(log);
+            if (state->state.compare_exchange_strong(current, ReactorState::kWriting)) {
+              state->reactor->StartWrite(&state->current_log);
+            }
+          } else if (state->execution_finished.load()) {
+            if (!state->stats_sent.load()) {
+              ExecutionLog stats_log;
+              stats_log.set_peak_memory_bytes(state->final_stats.peak_memory_bytes);
+              stats_log.set_execution_time_ms(static_cast<float>(state->final_stats.elapsed_time_ms));
+              stats_log.set_cache_hit(state->cache_hit.load());
+              stats_log.set_wall_clock_timeout(state->wall_clock_timeout.load());
+              stats_log.set_output_truncated(state->output_truncated.load());
+              state->current_log = std::move(stats_log);
+              state->stats_sent.store(true);
+              if (state->state.compare_exchange_strong(current, ReactorState::kWriting)) {
+                state->reactor->StartWrite(&state->current_log);
+              }
+            } else {
+              if (state->state.compare_exchange_strong(current, ReactorState::kFinishing)) {
+                state->reactor->Finish(Status::OK);
+              }
+            }
+          }
+        }
+        if (state->state.load() == ReactorState::kFinishing) break;
+      }
+    });
+    processor.detach();
+  }
+
+  void OnWriteDone(bool ok) override {
+    (void)ok;
+    ReactorState expected = ReactorState::kWriting;
+    shared_state_->state.compare_exchange_strong(expected, ReactorState::kIdle);
+    {
+      std::lock_guard<std::mutex> lock(shared_state_->notify_mutex);
+      shared_state_->notification_pending = true;
+    }
+    shared_state_->notify_cv.notify_one();
+  }
+
+  void OnDone() override {
+    {
+      std::lock_guard<std::mutex> lock(shared_state_->notify_mutex);
+      shared_state_->reactor_done = true;
+    }
+    shared_state_->notify_cv.notify_all();
+    shared_state_->counter.fetch_sub(1);
+    delete this;
+  }
+
+  void OnCancel() override {
+    shared_state_->cancelled.store(true);
+    {
+      std::lock_guard<std::mutex> lock(shared_state_->notify_mutex);
+      shared_state_->notification_pending = true;
+    }
+    shared_state_->notify_cv.notify_one();
+  }
+
+ private:
+  std::shared_ptr<ReactorInternalState> shared_state_;
+};
+
 class RejectReactor : public ServerWriteReactor<ExecutionLog> {
  public:
   RejectReactor() {
     Finish(Status(StatusCode::RESOURCE_EXHAUSTED, "Too many active sandboxes"));
   }
-
   void OnDone() override { delete this; }
 };
 
-// Handles code execution with streaming output and caching support.
-class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
- public:
-  ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter)
-      : request_(request), counter_(counter) {
-    counter_.fetch_add(1);
-    StartExecution();
-  }
-
-  void OnWriteDone(bool ok) override {
-    absl::MutexLock lock(&mutex_);
-    state_.SetWriting(false);
-    if (!ok) {
-      return;
-    }
-    MaybeWriteNext();
-  }
-
-  void OnDone() override {
-    if (worker_thread_.joinable()) {
-      worker_thread_.join();
-    }
-    counter_.fetch_sub(1);
-    delete this;
-  }
-
-  void OnCancel() override {
-    // In a real system, we'd kill the process here.
-  }
-
- private:
-  // Starts the execution in a background thread.
-  void StartExecution() {
-    worker_thread_ = std::thread([this]() { ExecuteInBackground(); });
-  }
-
-  // Executes code in the background thread.
-  void ExecuteInBackground() {
-    auto result = SandboxedProcess::CompileAndRunStreaming(
-        request_->language(),
-        request_->code(),
-        request_->stdin_data(),
-        [this](absl::string_view stdout_chunk, absl::string_view stderr_chunk) {
-          HandleExecutionOutput(stdout_chunk, stderr_chunk);
-        });
-
-    HandleExecutionComplete(result);
-  }
-
-  // Handles output chunks from execution.
-  void HandleExecutionOutput(absl::string_view stdout_chunk,
-                             absl::string_view stderr_chunk) {
-    absl::MutexLock lock(&mutex_);
-    ExecutionLog log;
-    if (!stdout_chunk.empty()) {
-      log.set_stdout_chunk(std::string(stdout_chunk));
-    }
-    if (!stderr_chunk.empty()) {
-      log.set_stderr_chunk(std::string(stderr_chunk));
-    }
-    state_.QueueLog(log);
-    MaybeWriteNext();
-  }
-
-  // Handles completion of execution.
-  void HandleExecutionComplete(const ExecutionResult& result) {
-    absl::MutexLock lock(&mutex_);
-    state_.SetStats(result.stats);
-    state_.SetCacheHit(result.cache_hit);
-    state_.SetWallClockTimeout(result.wall_clock_timeout);
-    state_.SetOutputTruncated(result.output_truncated);
-    state_.MarkFinished();
-    // If the process failed, stream a stderr chunk so the client sees a
-    // clear human-readable message and a trace of backend actions.
-    if (!result.success) {
-      ExecutionLog error_log;
-      std::string error_msg;
-      if (!result.error_message.empty()) {
-        error_msg += "ERROR: " + result.error_message + "\n";
-      }
-      if (!result.backend_trace.empty()) {
-        error_msg += result.backend_trace + "\n";
-      }
-      if (!error_msg.empty()) {
-        error_log.set_stderr_chunk(error_msg);
-        state_.QueueLog(error_log);
-      }
-    }
-    MaybeWriteNext();
-  }
-
-  // Attempts to write the next log entry if possible.
-  void MaybeWriteNext() {
-    if (state_.IsWriting()) {
-      return;
-    }
-
-    if (state_.HasPendingLogs()) {
-      WriteNextLog();
-    } else if (state_.IsFinished() && !state_.AreStatsSent()) {
-      WriteStatistics();
-    } else if (state_.IsFinished() && state_.AreStatsSent()) {
-      Finish(Status::OK);
-    }
-  }
-
-  // Writes the next log entry from the queue.
-  void WriteNextLog() {
-    state_.SetWriting(true);
-    current_log_ = state_.GetNextLog();
-    StartWrite(&current_log_);
-  }
-
-  // Writes resource statistics as the final log.
-  void WriteStatistics() {
-    state_.SetWriting(true);
-    state_.MarkStatsSent();
-    ExecutionLog stats_log;
-    stats_log.set_peak_memory_bytes(state_.GetStats().peak_memory_bytes);
-    stats_log.set_execution_time_ms(
-        static_cast<float>(state_.GetStats().elapsed_time_ms));
-    stats_log.set_cache_hit(state_.IsCacheHit());
-    stats_log.set_wall_clock_timeout(state_.IsWallClockTimeout());
-    stats_log.set_output_truncated(state_.IsOutputTruncated());
-    current_log_ = stats_log;
-    StartWrite(&current_log_);
-  }
-
-  const CodeRequest* request_;
-  std::thread worker_thread_;
-  absl::Mutex mutex_;
-  ExecutionReactorState state_;
-  ExecutionLog current_log_;
-  std::atomic<int>& counter_;
-};
-
-// Implements the gRPC CodeExecutor service.
 class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
  public:
   CodeExecutorServiceImpl() : active_sandboxes_(0) {}
-
-  ServerWriteReactor<ExecutionLog>* Execute(
-      CallbackServerContext* context, const CodeRequest* request) override {
-    if (active_sandboxes_.load() >=
-        absl::GetFlag(FLAGS_max_concurrent_sandboxes)) {
+  ServerWriteReactor<ExecutionLog>* Execute(CallbackServerContext* context, const CodeRequest* request) override {
+    (void)context;
+    if (active_sandboxes_.load() >= absl::GetFlag(FLAGS_max_concurrent_sandboxes)) {
       return new RejectReactor();
     }
     return new ExecuteReactor(request, active_sandboxes_);
   }
-
  private:
   std::atomic<int> active_sandboxes_;
 };
 
 }  // namespace
 
-// Starts the gRPC server and waits for connections.
 absl::Status RunServer() {
-  std::string server_address =
-      absl::StrCat("0.0.0.0:", absl::GetFlag(FLAGS_port));
+  std::string server_address = absl::Substitute("0.0.0.0:$0", absl::GetFlag(FLAGS_port));
   CodeExecutorServiceImpl service;
-
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
-  if (!server) {
-    return absl::InternalError("Failed to start gRPC server");
-  }
+  if (!server) return absl::InternalError("Failed to start gRPC server");
   LOG(INFO) << "Server listening on " << server_address;
   server->Wait();
   return absl::OkStatus();
@@ -300,12 +292,10 @@ absl::Status RunServer() {
 
 }  // namespace dcodex
 
-// Entry point for the application.
 int main(int argc, char** argv) {
   absl::InitializeLog();
   absl::ParseCommandLine(argc, argv);
-  absl::Status status = dcodex::RunServer();
-  if (!status.ok()) {
+  if (absl::Status status = dcodex::RunServer(); !status.ok()) {
     LOG(ERROR) << "Server failed: " << status.message();
     return 1;
   }

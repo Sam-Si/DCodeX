@@ -23,12 +23,22 @@ namespace dcodex {
 
 namespace {
 
-// Converts hash to hex string.
-std::string HashToHex(size_t hash) {
+/// Converts a hash value to a hexadecimal string.
+[[nodiscard]] std::string HashToHex(size_t hash) {
   return absl::StrFormat("%016x", hash);
 }
 
+/// Checks if a cache entry has expired based on TTL.
+[[nodiscard]] bool IsEntryExpired(const CachedResult& result,
+                                  absl::Duration ttl) {
+  return (absl::Now() - result.timestamp) > ttl;
+}
+
 }  // namespace
+
+// ==============================================================================
+// ExecutionCache Implementation
+// ==============================================================================
 
 ExecutionCache::ExecutionCache(absl::Duration ttl, size_t max_entries)
     : ttl_(ttl), max_entries_(max_entries) {}
@@ -37,13 +47,13 @@ std::shared_ptr<const CachedResult> ExecutionCache::Get(
     absl::string_view code_hash) {
   absl::MutexLock lock(&mutex_);
 
-  auto it = cache_.find(code_hash);
+  const auto it = cache_.find(code_hash);
   if (it == cache_.end()) {
     return nullptr;
   }
 
   // Check if expired.
-  if (IsExpired(*it->second.result)) {
+  if (IsEntryExpired(*it->second.result, ttl_)) {
     return nullptr;
   }
 
@@ -58,8 +68,7 @@ void ExecutionCache::Put(absl::string_view code_hash,
   absl::MutexLock lock(&mutex_);
 
   // Remove old entry if exists.
-  auto it = cache_.find(code_hash);
-  if (it != cache_.end()) {
+  if (const auto it = cache_.find(code_hash); it != cache_.end()) {
     lru_list_.erase(it->second.lru_iterator);
     cache_.erase(it);
   }
@@ -82,26 +91,24 @@ absl::StatusOr<std::string> ExecutionCache::ComputeHash(
   if (code.empty()) {
     return absl::InvalidArgumentError("Code cannot be empty");
   }
-  size_t hash = absl::Hash<absl::string_view>{}(code);
+  const size_t hash = absl::Hash<absl::string_view>{}(code);
   return HashToHex(hash);
 }
 
 void ExecutionCache::CleanupExpired() {
   absl::MutexLock lock(&mutex_);
 
-  auto now = absl::Now();
   // Collect keys to remove.
   std::list<std::string> to_remove;
 
   for (const auto& [hash, entry] : cache_) {
-    if (now - entry.result->timestamp > ttl_) {
+    if (IsEntryExpired(*entry.result, ttl_)) {
       to_remove.push_back(hash);
     }
   }
 
   for (const auto& hash : to_remove) {
-    auto it = cache_.find(hash);
-    if (it != cache_.end()) {
+    if (const auto it = cache_.find(hash); it != cache_.end()) {
       lru_list_.erase(it->second.lru_iterator);
       cache_.erase(it);
     }
@@ -129,8 +136,7 @@ void ExecutionCache::EvictIfNeeded() {
 }
 
 bool ExecutionCache::IsExpired(const CachedResult& result) const {
-  auto now = absl::Now();
-  return (now - result.timestamp) > ttl_;
+  return IsEntryExpired(result, ttl_);
 }
 
 }  // namespace dcodex
