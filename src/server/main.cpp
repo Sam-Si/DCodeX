@@ -14,9 +14,15 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <signal.h>
+#include <unistd.h>
+
 #include <atomic>
+#include <fstream>
+#include <iostream>
 #include <memory>
 #include <queue>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -462,9 +468,42 @@ class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
   WarmWorkerPool worker_pool_;
 };
 
+void EnsureSingleInstance() {
+  const std::string pid_file = "/tmp/dcodex_server.pid";
+  std::ifstream existing_pid_file(pid_file);
+  if (existing_pid_file.is_open()) {
+    pid_t old_pid;
+    if (existing_pid_file >> old_pid) {
+      if (kill(old_pid, 0) == 0) {
+        LOG(INFO) << "Existing server found with PID " << old_pid << ". Killing it...";
+        kill(old_pid, SIGTERM);
+        // Wait a bit for it to terminate
+        for (int i = 0; i < 10; ++i) {
+          if (kill(old_pid, 0) != 0) break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (kill(old_pid, 0) == 0) {
+          LOG(WARNING) << "Server did not terminate with SIGTERM, using SIGKILL...";
+          kill(old_pid, SIGKILL);
+        }
+      }
+    }
+    existing_pid_file.close();
+  }
+
+  std::ofstream new_pid_file(pid_file, std::ios::trunc);
+  if (new_pid_file.is_open()) {
+    new_pid_file << getpid();
+    new_pid_file.close();
+  } else {
+    LOG(ERROR) << "Failed to create PID file: " << pid_file;
+  }
+}
+
 }  // namespace
 
 absl::Status RunServer() {
+  EnsureSingleInstance();
   std::string server_address = absl::Substitute("0.0.0.0:$0", absl::GetFlag(FLAGS_port));
   CodeExecutorServiceImpl service(absl::GetFlag(FLAGS_max_concurrent_sandboxes));
   ServerBuilder builder;
