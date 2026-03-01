@@ -98,7 +98,6 @@ absl::StatusOr<std::string> ExecutionCache::ComputeHash(
 void ExecutionCache::CleanupExpired() {
   absl::MutexLock lock(&mutex_);
 
-  const auto now = absl::Now();
   // Collect keys to remove.
   std::list<std::string> to_remove;
 

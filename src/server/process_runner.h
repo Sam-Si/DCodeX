@@ -23,7 +23,12 @@
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#ifdef __linux__
 #include <sys/epoll.h>
+#elif defined(__APPLE__)
+#include <sys/event.h>
+#include <sys/time.h>
+#endif
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -36,6 +41,8 @@
 #include "absl/types/span.h"
 #include "src/server/output_filter.h"
 #include "src/server/sandbox.h"
+
+extern char **environ;
 
 namespace dcodex::internal {
 
@@ -91,46 +98,64 @@ class FileDescriptor {
 };
 
 // ==============================================================================
-// EpollInstance: RAII Wrapper for epoll instance
+// MultiplexInstance: RAII Wrapper for epoll (Linux) or kqueue (macOS)
 // ==============================================================================
 
-/// RAII wrapper for an epoll instance.
-class EpollInstance {
+/// RAII wrapper for an I/O multiplexing instance.
+class MultiplexInstance {
  public:
-  EpollInstance() : epfd_(epoll_create1(EPOLL_CLOEXEC)) {}
-  ~EpollInstance() = default;
+#ifdef __linux__
+  MultiplexInstance() : fd_(epoll_create1(EPOLL_CLOEXEC)) {}
+#elif defined(__APPLE__)
+  MultiplexInstance() : fd_(kqueue()) {}
+#endif
+  ~MultiplexInstance() = default;
 
   // Non-copyable, movable
-  EpollInstance(const EpollInstance&) = delete;
-  EpollInstance& operator=(const EpollInstance&) = delete;
-  EpollInstance(EpollInstance&&) = default;
-  EpollInstance& operator=(EpollInstance&&) = default;
+  MultiplexInstance(const MultiplexInstance&) = delete;
+  MultiplexInstance& operator=(const MultiplexInstance&) = delete;
+  MultiplexInstance(MultiplexInstance&&) = default;
+  MultiplexInstance& operator=(MultiplexInstance&&) = default;
 
-  /// Checks if the epoll instance is valid.
-  [[nodiscard]] bool IsValid() const noexcept { return epfd_.IsValid(); }
+  /// Checks if the multiplex instance is valid.
+  [[nodiscard]] bool IsValid() const noexcept { return fd_.IsValid(); }
 
-  /// Gets the epoll file descriptor.
-  [[nodiscard]] int Get() const noexcept { return epfd_.Get(); }
+  /// Gets the multiplex file descriptor.
+  [[nodiscard]] int Get() const noexcept { return fd_.Get(); }
 
-  /// Adds a file descriptor to the epoll instance.
+  /// Adds a file descriptor to the multiplex instance.
   /// Returns OK on success, or an error status on failure.
-  absl::Status AddFd(int fd, uint32_t events) {
+  absl::Status AddFd(int fd) {
+#ifdef __linux__
     struct epoll_event ev;
-    ev.events = events;
+    ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = fd;
-    if (epoll_ctl(epfd_.Get(), EPOLL_CTL_ADD, fd, &ev) == -1) {
+    if (epoll_ctl(fd_.Get(), EPOLL_CTL_ADD, fd, &ev) == -1) {
       return absl::ErrnoToStatus(errno, "epoll_ctl ADD failed");
     }
+#elif defined(__APPLE__)
+    struct kevent ev;
+    EV_SET(&ev, fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, (void*)(intptr_t)fd);
+    if (kevent(fd_.Get(), &ev, 1, nullptr, 0, nullptr) == -1) {
+      return absl::ErrnoToStatus(errno, "kevent ADD failed");
+    }
+#endif
     return absl::OkStatus();
   }
 
-  /// Removes a file descriptor from the epoll instance.
+  /// Removes a file descriptor from the multiplex instance.
   void RemoveFd(int fd) {
-    epoll_ctl(epfd_.Get(), EPOLL_CTL_DEL, fd, nullptr);
+#ifdef __linux__
+    epoll_ctl(fd_.Get(), EPOLL_CTL_DEL, fd, nullptr);
+#elif defined(__APPLE__)
+    struct kevent ev;
+    EV_SET(&ev, fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+    kevent(fd_.Get(), &ev, 1, nullptr, 0, nullptr);
+#endif
   }
 
  private:
-  FileDescriptor epfd_;
+  FileDescriptor fd_;
 };
 
 // ==============================================================================
@@ -267,13 +292,13 @@ class ProcessRunner {
     setrlimit(RLIMIT_AS, &mem_limit);
   }
 
-  /// Reads output from stdout and stderr pipes using epoll for efficient I/O.
+  /// Reads output from stdout and stderr pipes using efficient I/O multiplexing.
   /// Returns true if output was truncated.
-  static bool ReadOutputEpoll(int stdout_fd, int stderr_fd, pid_t child_pid,
-                              const OutputCallback& callback, bool& truncated) {
-    // Create epoll instance
-    EpollInstance epoll;
-    if (!epoll.IsValid()) {
+  static bool ReadOutputMultiplexed(int stdout_fd, int stderr_fd, pid_t child_pid,
+                                    const OutputCallback& callback, bool& truncated) {
+    // Create multiplex instance
+    MultiplexInstance multiplex;
+    if (!multiplex.IsValid()) {
       truncated = false;
       return false;
     }
@@ -282,28 +307,37 @@ class ProcessRunner {
     SetNonBlocking(stdout_fd);
     SetNonBlocking(stderr_fd);
 
-    // Add fds to epoll
-    if (!epoll.AddFd(stdout_fd, EPOLLIN | EPOLLET).ok()) {
+    // Add fds to multiplexer
+    if (!multiplex.AddFd(stdout_fd).ok()) {
       truncated = false;
       return false;
     }
-    if (!epoll.AddFd(stderr_fd, EPOLLIN | EPOLLET).ok()) {
-      epoll.RemoveFd(stdout_fd);
+    if (!multiplex.AddFd(stderr_fd).ok()) {
+      multiplex.RemoveFd(stdout_fd);
       truncated = false;
       return false;
     }
 
-    std::array<char, 4096> buffer{};
     bool stdout_open = true, stderr_open = true;
     size_t total_bytes = 0;
     truncated = false;
 
     constexpr int kMaxEvents = 2;
+#ifdef __linux__
     struct epoll_event events[kMaxEvents];
+#elif defined(__APPLE__)
+    struct kevent events[kMaxEvents];
+    struct timespec timeout = {0, 10000000}; // 10ms
+#endif
 
     while (stdout_open || stderr_open) {
       // Wait for events with a timeout
-      int nfds = epoll_wait(epoll.Get(), events, kMaxEvents, 10);
+      int nfds = 0;
+#ifdef __linux__
+      nfds = epoll_wait(multiplex.Get(), events, kMaxEvents, 10);
+#elif defined(__APPLE__)
+      nfds = kevent(multiplex.Get(), nullptr, 0, events, kMaxEvents, &timeout);
+#endif
       if (nfds < 0) {
         if (errno == EINTR) continue;
         break;
@@ -324,7 +358,12 @@ class ProcessRunner {
       }
 
       for (int i = 0; i < nfds; ++i) {
-        int fd = events[i].data.fd;
+        int fd = -1;
+#ifdef __linux__
+        fd = events[i].data.fd;
+#elif defined(__APPLE__)
+        fd = static_cast<int>(reinterpret_cast<intptr_t>(events[i].udata));
+#endif
         if (fd == stdout_fd && stdout_open) {
           ReadFromFd(fd, callback, true, stdout_open, total_bytes);
         } else if (fd == stderr_fd && stderr_open) {
@@ -348,12 +387,11 @@ class ProcessRunner {
     return truncated;
   }
 
-  /// Reads output from stdout and stderr pipes using select (fallback).
+  /// Reads output from stdout and stderr pipes using the best available method.
   /// Returns true if output was truncated.
   static bool ReadOutput(int stdout_fd, int stderr_fd, pid_t child_pid,
                          const OutputCallback& callback, bool& truncated) {
-    // Use epoll on Linux for better performance
-    return ReadOutputEpoll(stdout_fd, stderr_fd, child_pid, callback, truncated);
+    return ReadOutputMultiplexed(stdout_fd, stderr_fd, child_pid, callback, truncated);
   }
 
  private:

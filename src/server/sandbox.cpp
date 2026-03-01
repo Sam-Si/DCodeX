@@ -258,59 +258,73 @@ absl::StatusOr<ExecutionResult> HandleExecutionResult(
 // ProcessTimeoutManager Implementation
 // -----------------------------------------------------------------------------
 
+struct ProcessTimeoutState {
+  ProcessTimeoutState(absl::Duration timeout, ProcessTimeoutManager::TimeoutCallback callback)
+      : timeout(timeout), callback(std::move(callback)) {}
+
+  absl::Duration timeout;
+  ProcessTimeoutManager::TimeoutCallback callback;
+  grpc::Alarm alarm;
+  std::mutex mutex;
+  bool started = false;
+  bool triggered = false;
+  bool cancelled = false;
+};
+
 ProcessTimeoutManager::ProcessTimeoutManager(pid_t pid, absl::Duration timeout,
                                              TimeoutCallback callback)
-    : pid_(pid), timeout_(timeout), callback_(std::move(callback)) {}
+    : timeout_(timeout), callback_(std::move(callback)) {
+  (void)pid;
+  state_ = std::make_shared<ProcessTimeoutState>(timeout, std::move(callback_));
+}
 
 ProcessTimeoutManager::~ProcessTimeoutManager() { Cancel(); }
 
 void ProcessTimeoutManager::Start() {
-  absl::MutexLock lock(&mutex_);
-  if (started_ || cancelled_) {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (state_->started || state_->cancelled) {
     return;
   }
-  started_ = true;
+  state_->started = true;
 
-  // Calculate deadline from current time
-  auto deadline = absl::ToChronoTime(absl::Now() + timeout_);
+  auto deadline = absl::ToChronoTime(absl::Now() + state_->timeout);
   
-  // Set the gRPC Alarm with a callback
-  alarm_.Set(deadline, [this](bool ok) { OnAlarmTriggered(ok); });
+  state_->alarm.Set(deadline, [state = state_](bool ok) {
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      if (state->cancelled || !ok) {
+        return;
+      }
+      state->triggered = true;
+    }
+    if (state->callback) {
+      state->callback();
+    }
+  });
 }
 
 void ProcessTimeoutManager::Cancel() {
-  absl::MutexLock lock(&mutex_);
-  if (cancelled_ || triggered_) {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (state_->cancelled || state_->triggered) {
     return;
   }
-  cancelled_ = true;
-  alarm_.Cancel();
+  state_->cancelled = true;
+  state_->alarm.Cancel();
 }
 
 bool ProcessTimeoutManager::IsTriggered() const {
-  absl::MutexLock lock(&mutex_);
-  return triggered_;
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return state_->triggered;
 }
 
 bool ProcessTimeoutManager::IsCancelled() const {
-  absl::MutexLock lock(&mutex_);
-  return cancelled_;
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return state_->cancelled;
 }
 
 void ProcessTimeoutManager::OnAlarmTriggered(bool ok) {
-  absl::MutexLock lock(&mutex_);
-  if (cancelled_) {
-    return;
-  }
-  
-  if (ok) {
-    // Alarm fired (timeout occurred)
-    triggered_ = true;
-    if (callback_) {
-      callback_();
-    }
-  }
-  // If !ok, the alarm was cancelled
+  // This is no longer used as we use a lambda in Start()
+  (void)ok;
 }
 
 // -----------------------------------------------------------------------------

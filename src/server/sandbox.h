@@ -17,10 +17,10 @@
 
 #include <grpcpp/alarm.h>
 
-#include <atomic>
-#include <concepts>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -31,7 +31,6 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
-#include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "src/server/execution_cache.h"
@@ -355,7 +354,7 @@ class FinalizeResultStep : public ExecutionStep {
 // 1. Resource Efficiency: No extra process forked for each timeout
 // 2. Integration: Works seamlessly with gRPC's async completion queue
 // 3. Cancellation: Supports graceful cancellation via callback
-// 4. Thread Safety: Uses absl::Mutex for thread-safe state access
+// 4. Thread Safety: Uses std::mutex for thread-safe state access
 // 
 // Benefits of gRPC Alarm over fork-based approach:
 // - Eliminates process table pollution (no zombie processes)
@@ -391,15 +390,9 @@ class ProcessTimeoutManager {
  private:
   void OnAlarmTriggered(bool ok);
 
-  pid_t pid_;
   absl::Duration timeout_;
   TimeoutCallback callback_;
-  grpc::Alarm alarm_;
-  
-  mutable absl::Mutex mutex_;
-  bool started_ ABSL_GUARDED_BY(mutex_) = false;
-  bool triggered_ ABSL_GUARDED_BY(mutex_) = false;
-  bool cancelled_ ABSL_GUARDED_BY(mutex_) = false;
+  std::shared_ptr<struct ProcessTimeoutState> state_;
 };
 
 // Orchestrator class that manages sandboxed execution and caching.
