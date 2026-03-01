@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SRC_SERVER_EXECUTION_CACHE_H_
-#define SRC_SERVER_EXECUTION_CACHE_H_
+#ifndef SRC_COMMON_EXECUTION_CACHE_H_
+#define SRC_COMMON_EXECUTION_CACHE_H_
 
 #include <cstdint>
 #include <list>
@@ -89,4 +89,4 @@ class ExecutionCache {
 
 }  // namespace dcodex
 
-#endif  // SRC_SERVER_EXECUTION_CACHE_H_
+#endif  // SRC_COMMON_EXECUTION_CACHE_H_

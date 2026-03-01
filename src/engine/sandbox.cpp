@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "src/server/sandbox.h"
+#include "src/engine/sandbox.h"
 
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -29,8 +29,8 @@
 #include "absl/strings/str_join.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-#include "src/server/process_runner.h"
-#include "src/server/temp_file_manager.h"
+#include "src/engine/process_runner.h"
+#include "src/engine/temp_file_manager.h"
 
 ABSL_FLAG(int, sandbox_cpu_time_limit_seconds, 1,
           "CPU time limit in seconds for sandboxed execution");

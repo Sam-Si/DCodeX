@@ -37,7 +37,7 @@
 #include "absl/strings/substitute.h"
 #include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
-#include "src/server/sandbox.h"
+#include "src/engine/sandbox.h"
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 ABSL_FLAG(int, max_concurrent_sandboxes, 10,
