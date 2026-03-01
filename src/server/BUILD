@@ -51,6 +51,7 @@ cc_binary(
         "//proto:sandbox_cc_grpc",
         "@com_github_grpc_grpc//:grpc++_unsecure",
         "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/flags:parse",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:initialize",

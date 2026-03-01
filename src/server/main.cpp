@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/log/initialize.h"
@@ -28,7 +29,6 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/substitute.h"
-#include "absl/synchronization/condvar.h"
 #include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
 #include "src/server/sandbox.h"
@@ -82,134 +82,54 @@ class ThreadSafeLogQueue {
   std::queue<ExecutionLog> queue_;
 };
 
+// Forward declaration
+class ExecuteReactor;
+
 class WarmWorkerPool {
  public:
-  explicit WarmWorkerPool(int max_workers)
-      : max_workers_(max_workers),
-        idle_workers_(0),
-        shutting_down_(false) {}
+  explicit WarmWorkerPool(int max_workers);
 
   WarmWorkerPool(const WarmWorkerPool&) = delete;
   WarmWorkerPool& operator=(const WarmWorkerPool&) = delete;
 
-  void Start() {
-    absl::MutexLock lock(&mutex_);
-    if (!workers_.empty()) {
-      return;
-    }
-    const int worker_count = max_workers_ > 0 ? max_workers_ : 1;
-    workers_.reserve(worker_count);
-    for (int i = 0; i < worker_count; ++i) {
-      workers_.push_back(std::make_unique<Worker>(this));
-      idle_workers_++;
-    }
-  }
+  void Start();
+  void Shutdown();
 
-  void Shutdown() {
-    absl::MutexLock lock(&mutex_);
-    if (shutting_down_) {
-      return;
-    }
-    shutting_down_ = true;
-    for (const auto& worker : workers_) {
-      worker->Notify();
-    }
-  }
-
-  absl::StatusOr<class ExecuteReactor*> AcquireWorker(
-      std::unique_ptr<class ExecuteReactor> reactor) {
-    absl::MutexLock lock(&mutex_);
-    if (shutting_down_) {
-      return absl::FailedPreconditionError("Worker pool is shutting down");
-    }
-    if (idle_workers_ == 0) {
-      return absl::ResourceExhaustedError("No idle workers available");
-    }
-    for (const auto& worker : workers_) {
-      if (worker->TryAssign(std::move(reactor))) {
-        idle_workers_--;
-        return worker->GetActiveReactor();
-      }
-    }
-    return absl::InternalError("Failed to assign worker");
-  }
-
-  void NotifyWorkerIdle() {
-    absl::MutexLock lock(&mutex_);
-    idle_workers_++;
-  }
+  absl::Status AcquireWorker(std::shared_ptr<ExecuteReactor> reactor);
+  void NotifyWorkerIdle();
+  void ReleaseReactor(ExecuteReactor* reactor);
 
  private:
   class Worker {
    public:
-    explicit Worker(WarmWorkerPool* pool)
-        : pool_(pool),
-          thread_(&Worker::Run, this) {}
-
-    ~Worker() { Join(); }
+    explicit Worker(WarmWorkerPool* pool);
+    ~Worker();
 
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
 
-    bool TryAssign(std::unique_ptr<class ExecuteReactor> reactor) {
-      absl::MutexLock lock(&mutex_);
-      if (reactor_ || stopping_) {
-        return false;
-      }
-      reactor_ = std::move(reactor);
-      active_reactor_ = reactor_.get();
-      cv_.Signal();
-      return true;
-    }
-
-    ExecuteReactor* GetActiveReactor() const {
-      absl::MutexLock lock(&mutex_);
-      return active_reactor_;
-    }
-
-    void ClearActiveReactor() {
-      absl::MutexLock lock(&mutex_);
-      active_reactor_ = nullptr;
-    }
-
-    void Notify() {
-      absl::MutexLock lock(&mutex_);
-      stopping_ = true;
-      cv_.Signal();
-    }
-
-    void Join() {
-      {
-        absl::MutexLock lock(&mutex_);
-        stopping_ = true;
-        cv_.Signal();
-      }
-      if (thread_.joinable()) {
-        thread_.join();
-      }
-    }
+    bool TryAssign(std::shared_ptr<ExecuteReactor> reactor);
+    void Notify();
+    void Join();
 
    private:
     void Run();
 
     WarmWorkerPool* pool_;
-    std::unique_ptr<class ExecuteReactor> reactor_;
+    std::shared_ptr<ExecuteReactor> reactor_;
     mutable absl::Mutex mutex_;
     absl::CondVar cv_;
-    ExecuteReactor* active_reactor_ = nullptr;
     bool stopping_ = false;
     std::thread thread_;
   };
 
   absl::Mutex mutex_;
+  absl::flat_hash_map<ExecuteReactor*, std::shared_ptr<ExecuteReactor>> active_reactors_;
   std::vector<std::unique_ptr<Worker>> workers_;
   int max_workers_;
   int idle_workers_;
   bool shutting_down_;
 };
-
-// Forward declaration
-class ExecuteReactor;
 
 // Internal state of the reactor, shared between threads
 struct ReactorInternalState {
@@ -301,10 +221,11 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
     while (true) {
       {
         absl::MutexLock lock(&shared_state_->notify_mutex);
-        shared_state_->notify_cv.Wait(&shared_state_->notify_mutex, [&] {
-          return shared_state_->notification_pending || shared_state_->reactor_done ||
-                 shared_state_->cancelled.load();
-        });
+        while (!shared_state_->notification_pending &&
+               !shared_state_->reactor_done &&
+               !shared_state_->cancelled.load()) {
+          shared_state_->notify_cv.Wait(&shared_state_->notify_mutex);
+        }
         if (shared_state_->reactor_done ||
             (shared_state_->cancelled.load() &&
              shared_state_->state.load() == ReactorState::kIdle)) {
@@ -384,12 +305,106 @@ class ExecuteReactor : public ServerWriteReactor<ExecutionLog> {
   std::shared_ptr<ReactorInternalState> shared_state_;
 };
 
+WarmWorkerPool::WarmWorkerPool(int max_workers)
+    : max_workers_(max_workers),
+      idle_workers_(0),
+      shutting_down_(false) {}
+
+void WarmWorkerPool::Start() {
+  absl::MutexLock lock(&mutex_);
+  if (!workers_.empty()) {
+    return;
+  }
+  const int worker_count = max_workers_ > 0 ? max_workers_ : 1;
+  workers_.reserve(worker_count);
+  for (int i = 0; i < worker_count; ++i) {
+    workers_.push_back(std::make_unique<Worker>(this));
+    idle_workers_++;
+  }
+}
+
+void WarmWorkerPool::Shutdown() {
+  absl::MutexLock lock(&mutex_);
+  if (shutting_down_) {
+    return;
+  }
+  shutting_down_ = true;
+  for (const auto& worker : workers_) {
+    worker->Notify();
+  }
+}
+
+absl::Status WarmWorkerPool::AcquireWorker(
+    std::shared_ptr<ExecuteReactor> reactor) {
+  absl::MutexLock lock(&mutex_);
+  if (shutting_down_) {
+    return absl::FailedPreconditionError("Worker pool is shutting down");
+  }
+  if (idle_workers_ == 0) {
+    return absl::ResourceExhaustedError("No idle workers available");
+  }
+  ExecuteReactor* raw_reactor = reactor.get();
+  for (const auto& worker : workers_) {
+    if (worker->TryAssign(reactor)) {
+      active_reactors_.emplace(raw_reactor, std::move(reactor));
+      idle_workers_--;
+      return absl::OkStatus();
+    }
+  }
+  return absl::InternalError("Failed to assign worker");
+}
+
+void WarmWorkerPool::NotifyWorkerIdle() {
+  absl::MutexLock lock(&mutex_);
+  idle_workers_++;
+}
+
+void WarmWorkerPool::ReleaseReactor(ExecuteReactor* reactor) {
+  absl::MutexLock lock(&mutex_);
+  active_reactors_.erase(reactor);
+}
+
+WarmWorkerPool::Worker::Worker(WarmWorkerPool* pool)
+    : pool_(pool),
+      thread_(&Worker::Run, this) {}
+
+WarmWorkerPool::Worker::~Worker() { Join(); }
+
+bool WarmWorkerPool::Worker::TryAssign(std::shared_ptr<ExecuteReactor> reactor) {
+  absl::MutexLock lock(&mutex_);
+  if (reactor_ || stopping_) {
+    return false;
+  }
+  reactor_ = std::move(reactor);
+  cv_.Signal();
+  return true;
+}
+
+void WarmWorkerPool::Worker::Notify() {
+  absl::MutexLock lock(&mutex_);
+  stopping_ = true;
+  cv_.Signal();
+}
+
+void WarmWorkerPool::Worker::Join() {
+  {
+    absl::MutexLock lock(&mutex_);
+    stopping_ = true;
+    cv_.Signal();
+  }
+  if (thread_.joinable()) {
+    thread_.join();
+  }
+}
+
 void WarmWorkerPool::Worker::Run() {
   while (true) {
-    std::unique_ptr<ExecuteReactor> reactor;
+    std::shared_ptr<ExecuteReactor> reactor;
     {
       absl::MutexLock lock(&mutex_);
-      cv_.Wait(&mutex_, [&] { return reactor_ != nullptr || stopping_; });
+      while (reactor_ == nullptr && !stopping_) {
+        cv_.Wait(&mutex_);
+      }
       if (stopping_) {
         break;
       }
@@ -398,7 +413,8 @@ void WarmWorkerPool::Worker::Run() {
     reactor->StartExecution();
     reactor->PumpWrites();
     pool_->NotifyWorkerIdle();
-    ClearActiveReactor();
+    pool_->ReleaseReactor(reactor.get());
+    reactor.reset();
   }
 }
 
@@ -426,15 +442,13 @@ class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
     if (active_sandboxes_.load() >= absl::GetFlag(FLAGS_max_concurrent_sandboxes)) {
       return new RejectReactor();
     }
-    std::unique_ptr<ExecuteReactor> reactor =
-        std::make_unique<ExecuteReactor>(request, active_sandboxes_);
-    absl::StatusOr<ExecuteReactor*> assignment =
-        worker_pool_.AcquireWorker(std::move(reactor));
+    auto reactor = std::make_shared<ExecuteReactor>(request, active_sandboxes_);
+    absl::Status assignment = worker_pool_.AcquireWorker(reactor);
     if (!assignment.ok()) {
-      LOG(WARNING) << "Worker pool rejected request: " << assignment.status();
+      LOG(WARNING) << "Worker pool rejected request: " << assignment;
       return new RejectReactor();
     }
-    return *assignment;
+    return reactor.get();
   }
 
  private:
