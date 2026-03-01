@@ -125,7 +125,6 @@ void WarmWorkerPool::Worker::Run() {
     task->StartExecution();
     task->PumpWrites();
     pool_->NotifyWorkerIdle();
-    pool_->ReleaseTask(task.get());
     task.reset();
   }
 }
