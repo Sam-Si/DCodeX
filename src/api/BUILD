@@ -7,6 +7,7 @@ cc_library(
     copts = ["-std=c++23"],
     deps = [
         "//src/engine:sandbox",
+        "//src/engine:warm_worker_pool",
         "//proto:sandbox_cc_grpc",
         "@com_github_grpc_grpc//:grpc++_unsecure",
         "@com_google_absl//absl/log",
