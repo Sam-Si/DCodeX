@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SRC_SERVER_PROCESS_RUNNER_H_
-#define SRC_SERVER_PROCESS_RUNNER_H_
+#ifndef SRC_ENGINE_PROCESS_RUNNER_H_
+#define SRC_ENGINE_PROCESS_RUNNER_H_
 
 #include <array>
 #include <vector>
@@ -39,8 +39,8 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "src/server/output_filter.h"
-#include "src/server/sandbox.h"
+#include "src/engine/output_filter.h"
+#include "src/engine/sandbox.h"
 
 extern char **environ;
 
@@ -447,4 +447,4 @@ class ProcessRunner {
 
 }  // namespace dcodex::internal
 
-#endif  // SRC_SERVER_PROCESS_RUNNER_H_
+#endif  // SRC_ENGINE_PROCESS_RUNNER_H_

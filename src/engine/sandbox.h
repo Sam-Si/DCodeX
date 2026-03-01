@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SRC_SERVER_SANDBOX_H_
-#define SRC_SERVER_SANDBOX_H_
+#ifndef SRC_ENGINE_SANDBOX_H_
+#define SRC_ENGINE_SANDBOX_H_
 
 #include <grpcpp/alarm.h>
 
@@ -33,7 +33,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
-#include "src/server/execution_cache.h"
+#include "src/common/execution_cache.h"
 
 // Abseil Flags for sandboxed resource limits (must be in global namespace).
 ABSL_DECLARE_FLAG(int, sandbox_cpu_time_limit_seconds);
@@ -412,4 +412,4 @@ class SandboxedProcess {
 
 }  // namespace dcodex
 
-#endif  // SRC_SERVER_SANDBOX_H_
+#endif  // SRC_ENGINE_SANDBOX_H_

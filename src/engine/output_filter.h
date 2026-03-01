@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SRC_SERVER_OUTPUT_FILTER_H_
-#define SRC_SERVER_OUTPUT_FILTER_H_
+#ifndef SRC_ENGINE_OUTPUT_FILTER_H_
+#define SRC_ENGINE_OUTPUT_FILTER_H_
 
 #include "absl/strings/string_view.h"
 
@@ -40,4 +40,4 @@ inline const OutputFilterStrategy& GetOutputFilter() {
 
 }  // namespace dcodex::internal
 
-#endif  // SRC_SERVER_OUTPUT_FILTER_H_
+#endif  // SRC_ENGINE_OUTPUT_FILTER_H_
