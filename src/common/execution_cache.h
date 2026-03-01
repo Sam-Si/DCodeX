@@ -39,8 +39,40 @@ struct CachedResult {
   absl::Time timestamp;
 };
 
+// =============================================================================
+// CacheInterface: Abstract base class for cache implementations.
+// Follows the Dependency Inversion Principle - high-level modules depend
+// on this abstraction, not concrete implementations.
+// =============================================================================
+class CacheInterface {
+ public:
+  virtual ~CacheInterface() = default;
+
+  // Gets cached result if available and not expired.
+  // Returns nullptr if not found or expired.
+  [[nodiscard]] virtual std::shared_ptr<const CachedResult> Get(
+      absl::string_view code_hash) = 0;
+
+  // Stores result in cache.
+  virtual void Put(absl::string_view code_hash, const CachedResult& result) = 0;
+
+  // Computes hash of code using absl::Hash.
+  // Returns error status if hash computation fails.
+  [[nodiscard]] static absl::StatusOr<std::string> ComputeHash(
+      absl::string_view code);
+
+  // Clears all expired entries.
+  virtual void CleanupExpired() = 0;
+
+  // Clears entire cache.
+  virtual void Clear() = 0;
+
+  // Gets cache statistics.
+  [[nodiscard]] virtual size_t Size() const = 0;
+};
+
 // Thread-safe LRU cache with TTL support for code execution results.
-class ExecutionCache {
+class ExecutionCache : public CacheInterface {
  public:
   // Default TTL: 1 hour, max entries: 1000.
   explicit ExecutionCache(absl::Duration ttl = absl::Hours(1),
@@ -48,23 +80,20 @@ class ExecutionCache {
 
   // Gets cached result if available and not expired.
   // Returns nullptr if not found or expired.
-  std::shared_ptr<const CachedResult> Get(absl::string_view code_hash);
+  [[nodiscard]] std::shared_ptr<const CachedResult> Get(
+      absl::string_view code_hash) override;
 
   // Stores result in cache.
-  void Put(absl::string_view code_hash, const CachedResult& result);
-
-  // Computes hash of code using absl::Hash.
-  // Returns error status if hash computation fails.
-  static absl::StatusOr<std::string> ComputeHash(absl::string_view code);
+  void Put(absl::string_view code_hash, const CachedResult& result) override;
 
   // Clears all expired entries.
-  void CleanupExpired();
+  void CleanupExpired() override;
 
   // Clears entire cache.
-  void Clear();
+  void Clear() override;
 
   // Gets cache statistics.
-  size_t Size() const;
+  [[nodiscard]] size_t Size() const override;
 
  private:
   // LRU list type: stores hash keys. Front = most recently used.
@@ -84,7 +113,7 @@ class ExecutionCache {
   const size_t max_entries_;
 
   void EvictIfNeeded() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  bool IsExpired(const CachedResult& result) const;
+  [[nodiscard]] bool IsExpired(const CachedResult& result) const;
 };
 
 }  // namespace dcodex

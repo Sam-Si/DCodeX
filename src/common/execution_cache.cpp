@@ -37,6 +37,19 @@ namespace {
 }  // namespace
 
 // ==============================================================================
+// CacheInterface Implementation
+// ==============================================================================
+
+absl::StatusOr<std::string> CacheInterface::ComputeHash(
+    absl::string_view code) {
+  if (code.empty()) {
+    return absl::InvalidArgumentError("Code cannot be empty");
+  }
+  const size_t hash = absl::Hash<absl::string_view>{}(code);
+  return HashToHex(hash);
+}
+
+// ==============================================================================
 // ExecutionCache Implementation
 // ==============================================================================
 
@@ -84,15 +97,6 @@ void ExecutionCache::Put(absl::string_view code_hash,
 
   cache_.emplace(std::string(code_hash),
                  CacheEntry{cached, lru_list_.begin()});
-}
-
-absl::StatusOr<std::string> ExecutionCache::ComputeHash(
-    absl::string_view code) {
-  if (code.empty()) {
-    return absl::InvalidArgumentError("Code cannot be empty");
-  }
-  const size_t hash = absl::Hash<absl::string_view>{}(code);
-  return HashToHex(hash);
 }
 
 void ExecutionCache::CleanupExpired() {

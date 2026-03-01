@@ -1,35 +1,43 @@
 #!/usr/bin/env python3
 """
-Memory Exhaustion Example
-This script tries to allocate more memory than the sandbox allows.
-The sandbox has a 500 MB memory limit.
+Bounded Memory Allocation Example
+This script allocates memory in a bounded loop.
+The loop is capped at 100000000 iterations for safety.
 """
 
 
-def main():
-    print("Memory Exhaustion Test")
-    print("=" * 22)
-    print("Sandbox memory limit: 500 MB")
-    print("Attempting to allocate large amounts of memory...")
-    
-    allocations = []
-    chunk_size = 50 * 1024 * 1024  # 50 MB per chunk
+def main() -> int:
+    """Main function with bounded memory allocation loop."""
+    MAX_ITERATIONS: int = 100_000_000
+    CHUNK_SIZE: int = 50 * 1024 * 1024  # 50 MB per chunk
+
+    print("Bounded Memory Allocation Test")
+    print("=" * 30)
+    print(f"Max iterations: {MAX_ITERATIONS:,}")
+    print(f"Chunk size: {CHUNK_SIZE // (1024 * 1024)} MB")
+    print("Attempting to allocate memory...")
+
+    allocations: list[str] = []
+    iteration: int = 0
     
     try:
-        i = 1
-        while True:
-            print(f"Allocating chunk {i} ({chunk_size // (1024 * 1024)} MB)...")
+        while iteration < MAX_ITERATIONS:
+            chunk_num = iteration + 1
+            print(f"Allocating chunk {chunk_num} ({CHUNK_SIZE // (1024 * 1024)} MB)...")
             # Allocate a large string of 'X' characters
-            allocations.append("X" * chunk_size)
-            total_mb = i * chunk_size // (1024 * 1024)
+            allocations.append("X" * CHUNK_SIZE)
+            total_mb = chunk_num * CHUNK_SIZE // (1024 * 1024)
             print(f"Total allocated: {total_mb} MB")
-            i += 1
+            iteration += 1
+        print(f"Reached iteration limit of {MAX_ITERATIONS:,}")
     except MemoryError as e:
-        print(f"Memory allocation failed: {e}")
-    
-    # This line may or may not be reached
-    print("Program reached end (may have been terminated by sandbox)")
+        print(f"Memory allocation failed after {iteration} iterations: {e}")
+
+    print(f"Program completed. Total iterations: {iteration}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    sys.exit(main())

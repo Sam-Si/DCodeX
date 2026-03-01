@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 """
-Infinite Loop Example
-This script runs an infinite loop that will be terminated by the sandbox.
-The sandbox has a 1-second CPU time limit.
+Bounded Loop Example
+This script runs a bounded CPU-intensive loop.
+The loop is capped at 100000000 iterations for safety.
 """
 
 
-def main():
-    print("Starting infinite loop...")
-    print("This program will be terminated by the sandbox timeout.")
-    print("Sandbox CPU limit: 1 second")
-    
-    counter = 0
-    
-    # Infinite loop - will exceed CPU time limit
-    while True:
+def main() -> int:
+    """Main function with bounded CPU-intensive loop."""
+    MAX_ITERATIONS: int = 100_000_000
+
+    print("Starting bounded CPU-intensive loop...")
+    print(f"Max iterations: {MAX_ITERATIONS:,}")
+
+    counter: int = 0
+
+    # Bounded loop - will complete within iteration limit
+    while counter < MAX_ITERATIONS:
         counter += 1
-        if counter % 1000000 == 0:
-            print(f"Iteration: {counter}")
-    
-    # This line will never be reached
-    print("Program completed (should not see this)")
+        if counter % 1_000_000 == 0:
+            print(f"Iteration: {counter:,}")
+
+    print(f"Program completed. Total iterations: {counter:,}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    sys.exit(main())

@@ -29,7 +29,12 @@
 #include "absl/strings/str_join.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "src/engine/execution_pipeline.h"
+#include "src/engine/execution_step.h"
+#include "src/engine/execution_strategy.h"
+#include "src/engine/execution_types.h"
 #include "src/engine/process_runner.h"
+#include "src/engine/process_timeout_manager.h"
 #include "src/engine/temp_file_manager.h"
 
 ABSL_FLAG(int, sandbox_cpu_time_limit_seconds, 1,
@@ -328,6 +333,35 @@ void ProcessTimeoutManager::OnAlarmTriggered(bool ok) {
 }
 
 // -----------------------------------------------------------------------------
+// ExecutionPipeline Implementation
+// -----------------------------------------------------------------------------
+
+ExecutionPipeline::ExecutionPipeline(std::shared_ptr<CacheInterface> cache)
+    : cache_(std::move(cache)) {}
+
+absl::StatusOr<ExecutionResult> ExecutionPipeline::Run(ExecutionContext& context) {
+  for (const auto& step : steps_) {
+    context.trace << absl::StrFormat("[STEP] %s\n", step->Name());
+    absl::Status status = step->Execute(context);
+    if (!status.ok()) {
+      context.trace << absl::StrFormat("[FAIL] Step '%s' failed: %s\n",
+                                       step->Name(), status.message());
+      if (context.result.error_message.empty()) {
+        context.result.error_message =
+            absl::StrFormat("Step '%s' failed: %s", step->Name(),
+                            status.message());
+      }
+      context.result.backend_trace = context.trace.str();
+      return status;
+    }
+    context.trace << absl::StrFormat("[OK] Step '%s' completed\n",
+                                     step->Name());
+  }
+  context.result.backend_trace = context.trace.str();
+  return context.result;
+}
+
+// -----------------------------------------------------------------------------
 // Concrete Execution Steps Implementation
 // -----------------------------------------------------------------------------
 
@@ -452,17 +486,22 @@ absl::Status FinalizeResultStep::Execute(ExecutionContext& context) {
 // CompiledLanguageStrategy Implementation
 // Supports both C and C++ compilation with appropriate compiler selection.
 // -----------------------------------------------------------------------------
+CompiledLanguageStrategy::CompiledLanguageStrategy(
+    Language language, std::shared_ptr<CacheInterface> cache)
+    : language_(language), cache_(std::move(cache)) {}
+
 absl::StatusOr<ExecutionResult> CompiledLanguageStrategy::Execute(
     absl::string_view code, absl::string_view stdin_data,
     OutputCallback callback) {
   ExecutionContext context(code, stdin_data, std::move(callback));
   
-  auto pipeline = CreatePipeline();
+  auto pipeline = CreatePipeline(cache_);
   return pipeline->Run(context);
 }
 
-std::unique_ptr<ExecutionPipeline> CompiledLanguageStrategy::CreatePipeline() {
-  auto pipeline = std::make_unique<ExecutionPipeline>();
+std::unique_ptr<ExecutionPipeline> CompiledLanguageStrategy::CreatePipeline(
+    std::shared_ptr<CacheInterface> cache) {
+  auto pipeline = std::make_unique<ExecutionPipeline>(std::move(cache));
   pipeline->AddStep(std::make_unique<CreateSourceFileStep>(GetExtension()))
            .AddStep(std::make_unique<CompileStep>(GetCompiler(), GetStandardFlags()))
            .AddStep(std::make_unique<RunProcessStep>(true))
@@ -474,17 +513,22 @@ std::unique_ptr<ExecutionPipeline> CompiledLanguageStrategy::CreatePipeline() {
 // -----------------------------------------------------------------------------
 // PythonExecutionStrategy Implementation
 // -----------------------------------------------------------------------------
+PythonExecutionStrategy::PythonExecutionStrategy(
+    std::shared_ptr<CacheInterface> cache)
+    : cache_(std::move(cache)) {}
+
 absl::StatusOr<ExecutionResult> PythonExecutionStrategy::Execute(
     absl::string_view code, absl::string_view stdin_data,
     OutputCallback callback) {
   ExecutionContext context(code, stdin_data, std::move(callback));
   
-  auto pipeline = CreatePipeline();
+  auto pipeline = CreatePipeline(cache_);
   return pipeline->Run(context);
 }
 
-std::unique_ptr<ExecutionPipeline> PythonExecutionStrategy::CreatePipeline() {
-  auto pipeline = std::make_unique<ExecutionPipeline>();
+std::unique_ptr<ExecutionPipeline> PythonExecutionStrategy::CreatePipeline(
+    std::shared_ptr<CacheInterface> cache) {
+  auto pipeline = std::make_unique<ExecutionPipeline>(std::move(cache));
   pipeline->AddStep(std::make_unique<CreateSourceFileStep>(".py"))
            .AddStep(std::make_unique<RunProcessStep>(true))
            .AddStep(std::make_unique<FinalizeResultStep>("PythonExecution"));
@@ -493,23 +537,22 @@ std::unique_ptr<ExecutionPipeline> PythonExecutionStrategy::CreatePipeline() {
 
 // --- ExecutionStrategy Factory ---
 absl::StatusOr<std::unique_ptr<ExecutionStrategy>> ExecutionStrategy::Create(
-    absl::string_view filename_or_extension) {
+    absl::string_view filename_or_extension,
+    std::shared_ptr<CacheInterface> cache) {
   // Check for Python
   if (absl::EndsWith(filename_or_extension, ".py") ||
       filename_or_extension == "python") {
-    return std::make_unique<PythonExecutionStrategy>();
+    return std::make_unique<PythonExecutionStrategy>(std::move(cache));
   }
   
   // Check for C
   if (absl::EndsWith(filename_or_extension, ".c") ||
       filename_or_extension == "c") {
-    return std::make_unique<CompiledLanguageStrategy>(
-        CompiledLanguageStrategy::Language::kC);
+    return std::make_unique<CExecutionStrategy>(std::move(cache));
   }
   
   // Default to C++ for .cpp, .cc, .cxx, or unknown
-  return std::make_unique<CompiledLanguageStrategy>(
-      CompiledLanguageStrategy::Language::kCpp);
+  return std::make_unique<CppExecutionStrategy>(std::move(cache));
 }
 
 // --- SandboxedProcess Implementation ---
@@ -518,9 +561,13 @@ void SandboxedProcess::ClearCache() { CacheHolder::Get().Clear(); }
 
 absl::StatusOr<ExecutionResult> SandboxedProcess::CompileAndRunStreaming(
     absl::string_view filename_or_extension, absl::string_view code,
-    absl::string_view stdin_data, OutputCallback callback) {
+    absl::string_view stdin_data, OutputCallback callback,
+    std::shared_ptr<CacheInterface> cache) {
+  // Use global cache if no cache provided
+  std::shared_ptr<CacheInterface> effective_cache = cache ? cache : std::shared_ptr<CacheInterface>(&GetCache(), [](CacheInterface*){});
+  
   absl::StatusOr<std::unique_ptr<ExecutionStrategy>> strategy_result =
-      ExecutionStrategy::Create(filename_or_extension);
+      ExecutionStrategy::Create(filename_or_extension, effective_cache);
   if (!strategy_result.ok()) {
     return strategy_result.status();
   }
@@ -529,10 +576,10 @@ absl::StatusOr<ExecutionResult> SandboxedProcess::CompileAndRunStreaming(
 
   std::string cache_input = absl::StrCat(strategy->GetStrategyId(), ":", code,
                                         "\0", stdin_data);
-  absl::StatusOr<std::string> hash_res = ExecutionCache::ComputeHash(cache_input);
+  absl::StatusOr<std::string> hash_res = CacheInterface::ComputeHash(cache_input);
 
   if (hash_res.ok()) {
-    auto cached = GetCache().Get(hash_res.value());
+    auto cached = effective_cache->Get(hash_res.value());
     if (cached) {
       if (!cached->stdout_output.empty()) callback(cached->stdout_output, "");
       if (!cached->stderr_output.empty()) callback("", cached->stderr_output);
@@ -576,7 +623,7 @@ absl::StatusOr<ExecutionResult> SandboxedProcess::CompileAndRunStreaming(
     cr.execution_time_ms = static_cast<float>(result->stats.elapsed_time_ms);
     cr.success = result->success;
     cr.error_message = result->error_message;
-    GetCache().Put(hash_res.value(), cr);
+    effective_cache->Put(hash_res.value(), cr);
   }
 
   return result;

@@ -1,26 +1,33 @@
-// Standard C++ Time Limit Exceeded Example
-// This program runs a long computation with periodic I/O to simulate real workload
-// The sandbox has a 1-second CPU time limit (configurable via --sandbox_cpu_time_limit_seconds)
+// Standard C++ Bounded Computation Example
+// This program runs a bounded computation with periodic I/O to simulate real workload
+// The loop is capped at 100000000 iterations for safety
 
+#include <cstdint>
 #include <chrono>
 #include <iostream>
 #include <thread>
 
 int main() {
-  std::cout << "Processing..." << std::endl;
+  constexpr uint64_t kMaxIterations = 100000000ULL;
+  constexpr int kInnerLoopCount = 1000000;
+  
+  std::cout << "Processing (max " << kMaxIterations << " iterations)..." << std::endl;
 
-  volatile long counter = 0;
+  volatile uint64_t counter = 0;
+  uint64_t iteration = 0;
 
-  // Long computation with periodic sleeps - will exceed CPU time limit
-  while (true) {
+  // Bounded computation with periodic sleeps
+  while (iteration < kMaxIterations) {
     // Simulate computational work
-    for (volatile int i = 0; i < 1000000; ++i) {
-      counter++;
+    for (volatile int i = 0; i < kInnerLoopCount; ++i) {
+      ++counter;
     }
 
     // Periodic sleep to simulate realistic workload
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ++iteration;
   }
 
+  std::cout << "Completed " << iteration << " iterations." << std::endl;
   return 0;
 }
