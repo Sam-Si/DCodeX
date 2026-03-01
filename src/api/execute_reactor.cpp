@@ -13,9 +13,10 @@
 // limitations under the License.
 
 #include "src/api/execute_reactor.h"
-#include "src/engine/warm_worker_pool.h"
-#include "absl/strings/substitute.h"
+
 #include "absl/log/log.h"
+#include "absl/strings/substitute.h"
+#include "src/engine/warm_worker_pool.h"
 
 namespace dcodex {
 
@@ -173,7 +174,7 @@ void ExecuteReactor::OnDone() {
   shared_state_->notify_cv.SignalAll();
   shared_state_->counter.fetch_sub(1);
   if (pool_ != nullptr) {
-    pool_->ReleaseReactor(this);
+    pool_->ReleaseTask(this);
   }
 }
 

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include "src/engine/warm_worker_pool.h"
-#include "src/api/execute_reactor.h"
 
 namespace dcodex {
 
@@ -48,8 +47,7 @@ void WarmWorkerPool::Shutdown() {
   }
 }
 
-absl::Status WarmWorkerPool::AcquireWorker(
-    std::shared_ptr<ExecuteReactor> reactor) {
+absl::Status WarmWorkerPool::AcquireWorker(std::shared_ptr<WorkerTask> task) {
   absl::MutexLock lock(&mutex_);
   if (shutting_down_) {
     return absl::FailedPreconditionError("Worker pool is shutting down");
@@ -57,10 +55,10 @@ absl::Status WarmWorkerPool::AcquireWorker(
   if (idle_workers_ == 0) {
     return absl::ResourceExhaustedError("No idle workers available");
   }
-  ExecuteReactor* raw_reactor = reactor.get();
+  WorkerTask* raw_task = task.get();
   for (const auto& worker : workers_) {
-    if (worker->TryAssign(reactor)) {
-      active_reactors_.emplace(raw_reactor, std::move(reactor));
+    if (worker->TryAssign(task)) {
+      active_tasks_.emplace(raw_task, std::move(task));
       idle_workers_--;
       return absl::OkStatus();
     }
@@ -73,9 +71,9 @@ void WarmWorkerPool::NotifyWorkerIdle() {
   idle_workers_++;
 }
 
-void WarmWorkerPool::ReleaseReactor(ExecuteReactor* reactor) {
+void WarmWorkerPool::ReleaseTask(WorkerTask* task) {
   absl::MutexLock lock(&mutex_);
-  active_reactors_.erase(reactor);
+  active_tasks_.erase(task);
 }
 
 WarmWorkerPool::Worker::Worker(WarmWorkerPool* pool)
@@ -84,12 +82,12 @@ WarmWorkerPool::Worker::Worker(WarmWorkerPool* pool)
 
 WarmWorkerPool::Worker::~Worker() { Join(); }
 
-bool WarmWorkerPool::Worker::TryAssign(std::shared_ptr<ExecuteReactor> reactor) {
+bool WarmWorkerPool::Worker::TryAssign(std::shared_ptr<WorkerTask> task) {
   absl::MutexLock lock(&mutex_);
-  if (reactor_ || stopping_) {
+  if (task_ || stopping_) {
     return false;
   }
-  reactor_ = std::move(reactor);
+  task_ = std::move(task);
   cv_.Signal();
   return true;
 }
@@ -113,22 +111,22 @@ void WarmWorkerPool::Worker::Join() {
 
 void WarmWorkerPool::Worker::Run() {
   while (true) {
-    std::shared_ptr<ExecuteReactor> reactor;
+    std::shared_ptr<WorkerTask> task;
     {
       absl::MutexLock lock(&mutex_);
-      while (reactor_ == nullptr && !stopping_) {
+      while (task_ == nullptr && !stopping_) {
         cv_.Wait(&mutex_);
       }
       if (stopping_) {
         break;
       }
-      reactor = std::move(reactor_);
+      task = std::move(task_);
     }
-    reactor->StartExecution();
-    reactor->PumpWrites();
+    task->StartExecution();
+    task->PumpWrites();
     pool_->NotifyWorkerIdle();
-    pool_->ReleaseReactor(reactor.get());
-    reactor.reset();
+    pool_->ReleaseTask(task.get());
+    task.reset();
   }
 }
 

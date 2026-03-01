@@ -19,10 +19,15 @@
 #include <atomic>
 #include <memory>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
 #include "src/engine/warm_worker_pool.h"
 
 namespace dcodex {
+
+class RejectReactor;
 
 class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
  public:
@@ -32,9 +37,16 @@ class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
   grpc::ServerWriteReactor<ExecutionLog>* Execute(
       grpc::CallbackServerContext* context, const CodeRequest* request) override;
 
+  void TrackRejectReactor(const std::shared_ptr<RejectReactor>& reactor);
+  void ReleaseRejectReactor(const RejectReactor* reactor);
+
  private:
   std::atomic<int> active_sandboxes_;
   WarmWorkerPool worker_pool_;
+
+  mutable absl::Mutex reject_mutex_;
+  absl::flat_hash_map<const RejectReactor*, std::shared_ptr<RejectReactor>>
+      reject_reactors_ ABSL_GUARDED_BY(reject_mutex_);
 };
 
 void EnsureSingleInstance();

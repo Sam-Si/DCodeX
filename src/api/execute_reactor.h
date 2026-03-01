@@ -24,10 +24,9 @@
 #include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
 #include "src/engine/sandbox.h"
+#include "src/engine/warm_worker_pool.h"
 
 namespace dcodex {
-
-class WarmWorkerPool;
 
 // Reactor state enumeration
 enum class ReactorState {
@@ -75,13 +74,14 @@ struct ReactorInternalState {
   ResourceStats final_stats;
 };
 
-class ExecuteReactor : public grpc::ServerWriteReactor<ExecutionLog> {
+class ExecuteReactor final : public grpc::ServerWriteReactor<ExecutionLog>,
+                            public WorkerTask {
  public:
   ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter,
                  WarmWorkerPool* pool);
 
-  void StartExecution();
-  void PumpWrites();
+  void StartExecution() override;
+  void PumpWrites() override;
 
   void OnWriteDone(bool ok) override;
   void OnDone() override;

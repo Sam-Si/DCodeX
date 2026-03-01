@@ -17,25 +17,35 @@
 #include <unistd.h>
 #include <fstream>
 #include <thread>
+
 #include "absl/flags/flag.h"
 #include "absl/log/log.h"
+#include "absl/strings/string_view.h"
 #include "src/api/execute_reactor.h"
 
 ABSL_DECLARE_FLAG(int, max_concurrent_sandboxes);
 
 namespace dcodex {
 
-namespace {
-
-class RejectReactor : public grpc::ServerWriteReactor<ExecutionLog> {
+class RejectReactor final : public grpc::ServerWriteReactor<ExecutionLog> {
  public:
-  RejectReactor() {
-    Finish(grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "Too many active sandboxes"));
+  RejectReactor(absl::string_view reason, CodeExecutorServiceImpl* owner)
+      : owner_(owner) {
+    Finish(grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                        std::string(reason)));
   }
-  void OnDone() override { delete this; }
+
+  void OnDone() override;
+
+ private:
+  CodeExecutorServiceImpl* owner_;
 };
 
-}  // namespace
+void RejectReactor::OnDone() {
+  if (owner_ != nullptr) {
+    owner_->ReleaseRejectReactor(this);
+  }
+}
 
 CodeExecutorServiceImpl::CodeExecutorServiceImpl(int max_sandboxes)
     : active_sandboxes_(0),
@@ -43,20 +53,41 @@ CodeExecutorServiceImpl::CodeExecutorServiceImpl(int max_sandboxes)
   worker_pool_.Start();
 }
 
-CodeExecutorServiceImpl::~CodeExecutorServiceImpl() { worker_pool_.Shutdown(); }
+CodeExecutorServiceImpl::~CodeExecutorServiceImpl() {
+  worker_pool_.Shutdown();
+  absl::MutexLock lock(&reject_mutex_);
+  reject_reactors_.clear();
+}
+
+void CodeExecutorServiceImpl::TrackRejectReactor(
+    const std::shared_ptr<RejectReactor>& reactor) {
+  absl::MutexLock lock(&reject_mutex_);
+  reject_reactors_.emplace(reactor.get(), reactor);
+}
+
+void CodeExecutorServiceImpl::ReleaseRejectReactor(const RejectReactor* reactor) {
+  absl::MutexLock lock(&reject_mutex_);
+  reject_reactors_.erase(reactor);
+}
 
 grpc::ServerWriteReactor<ExecutionLog>* CodeExecutorServiceImpl::Execute(
     grpc::CallbackServerContext* context, const CodeRequest* request) {
   (void)context;
   if (active_sandboxes_.load() >= absl::GetFlag(FLAGS_max_concurrent_sandboxes)) {
-    return new RejectReactor();
+    auto reactor = std::make_shared<RejectReactor>(
+        "Too many active sandboxes", this);
+    TrackRejectReactor(reactor);
+    return reactor.get();
   }
-  auto reactor =
-      std::make_shared<ExecuteReactor>(request, active_sandboxes_, &worker_pool_);
+  auto reactor = std::make_shared<ExecuteReactor>(request, active_sandboxes_,
+                                                   &worker_pool_);
   absl::Status assignment = worker_pool_.AcquireWorker(reactor);
   if (!assignment.ok()) {
     LOG(WARNING) << "Worker pool rejected request: " << assignment;
-    return new RejectReactor();
+    auto reject_reactor = std::make_shared<RejectReactor>(
+        "Worker pool rejected request", this);
+    TrackRejectReactor(reject_reactor);
+    return reject_reactor.get();
   }
   return reactor.get();
 }

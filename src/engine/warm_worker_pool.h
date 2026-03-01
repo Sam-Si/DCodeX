@@ -25,7 +25,12 @@
 
 namespace dcodex {
 
-class ExecuteReactor;
+class WorkerTask {
+ public:
+  virtual ~WorkerTask() = default;
+  virtual void StartExecution() = 0;
+  virtual void PumpWrites() = 0;
+};
 
 class WarmWorkerPool {
  public:
@@ -38,9 +43,9 @@ class WarmWorkerPool {
   void Start();
   void Shutdown();
 
-  absl::Status AcquireWorker(std::shared_ptr<ExecuteReactor> reactor);
+  absl::Status AcquireWorker(std::shared_ptr<WorkerTask> task);
   void NotifyWorkerIdle();
-  void ReleaseReactor(ExecuteReactor* reactor);
+  void ReleaseTask(WorkerTask* task);
 
  private:
   class Worker {
@@ -51,7 +56,7 @@ class WarmWorkerPool {
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
 
-    bool TryAssign(std::shared_ptr<ExecuteReactor> reactor);
+    bool TryAssign(std::shared_ptr<WorkerTask> task);
     void Notify();
     void Join();
 
@@ -59,7 +64,7 @@ class WarmWorkerPool {
     void Run();
 
     WarmWorkerPool* pool_;
-    std::shared_ptr<ExecuteReactor> reactor_;
+    std::shared_ptr<WorkerTask> task_;
     mutable absl::Mutex mutex_;
     absl::CondVar cv_;
     bool stopping_ = false;
@@ -67,7 +72,7 @@ class WarmWorkerPool {
   };
 
   absl::Mutex mutex_;
-  absl::flat_hash_map<ExecuteReactor*, std::shared_ptr<ExecuteReactor>> active_reactors_;
+  absl::flat_hash_map<WorkerTask*, std::shared_ptr<WorkerTask>> active_tasks_;
   std::vector<std::unique_ptr<Worker>> workers_;
   int max_workers_;
   int idle_workers_;

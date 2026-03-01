@@ -29,7 +29,6 @@ cc_library(
     hdrs = ["warm_worker_pool.h"],
     copts = ["-std=c++23"],
     deps = [
-        "//src/api:execute_reactor",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/synchronization",
