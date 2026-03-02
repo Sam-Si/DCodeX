@@ -23,17 +23,14 @@ from typing import TYPE_CHECKING
 
 import grpc
 
-# Add paths for proto imports
-sys.path.append(os.path.join(os.path.dirname(__file__), "."))
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
-import proto.sandbox_pb2 as sandbox_pb2
+from python_client.proto import sandbox_pb2
+from python_client.proto import sandbox_pb2_grpc
 
 from python_client.formatter import (
     COLOR_RED,
     COLOR_RESET,
 )
-from python_client.execution_types import CodeExecutorStub, ExecutionResult
+from python_client.execution_types import ExecutionResult
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -43,21 +40,23 @@ if TYPE_CHECKING:
 class GrpcClient:
     """gRPC client for communicating with the DCodeX server."""
 
-    def __init__(self, stub: CodeExecutorStub | None = None) -> None:
+    def __init__(self, server_address: str = "localhost:50051") -> None:
         """Initialize GrpcClient.
 
         Args:
-            stub: Optional gRPC stub. If not provided, must be set before use.
+            server_address: Address of the DCodeX server.
         """
-        self._stub = stub
+        self._server_address = server_address
+        self._channel = grpc.insecure_channel(server_address)
+        self._stub = sandbox_pb2_grpc.CodeExecutorStub(self._channel)
 
-    def set_stub(self, stub: CodeExecutorStub) -> None:
-        """Set the gRPC stub.
+    def get_stub(self):
+        """Returns the gRPC stub."""
+        return self._stub
 
-        Args:
-            stub: gRPC stub for the CodeExecutor service.
-        """
-        self._stub = stub
+    def close(self) -> None:
+        """Close the gRPC channel."""
+        self._channel.close()
 
     def execute_code(
             self,
@@ -65,6 +64,7 @@ class GrpcClient:
             language: str,
             description: str = "",
             stdin_data: str = "",
+            policy: str = "default",
     ) -> ExecutionResult:
         """Execute code and return results with timing.
 
@@ -74,20 +74,16 @@ class GrpcClient:
             description: Optional description of the code.
             stdin_data: Data to feed to the program's standard input.
                 Empty string means the program receives EOF immediately.
+            policy: Execution policy ("default", "strict", "lax").
 
         Returns:
             ExecutionResult containing stdout, stderr, timing, and cache status.
-
-        Raises:
-            RuntimeError: If no stub has been set.
         """
-        if self._stub is None:
-            raise RuntimeError("gRPC stub not set. Call set_stub() first.")
-
         request: Any = sandbox_pb2.CodeRequest(
             language=language,
             code=code,
             stdin_data=stdin_data,
+            policy=policy,
         )
 
         start_time = time.time()
@@ -102,28 +98,39 @@ class GrpcClient:
         stdout_output: list[str] = []
         stderr_output: list[str] = []
 
-        for response in responses:
-            if response.stdout_chunk:
-                stdout_output.append(response.stdout_chunk)
-                print(response.stdout_chunk, end="", flush=True)
-            if response.stderr_chunk:
-                stderr_output.append(response.stderr_chunk)
-                print(
-                    f"{COLOR_RED}STDERR: {response.stderr_chunk}{COLOR_RESET}",
-                    end="",
-                    flush=True,
-                )
-            if response.peak_memory_bytes > 0:
-                peak_memory = response.peak_memory_bytes
-            if response.execution_time_ms > 0:
-                execution_time = response.execution_time_ms
-            cache_hit = response.cache_hit
-            if response.cache_hit and response.execution_time_ms > 0:
-                cached_execution_time = response.execution_time_ms
-            if response.wall_clock_timeout:
-                wall_clock_timeout = True
-            if response.output_truncated:
-                output_truncated = True
+        try:
+            for response in responses:
+                if response.stdout_chunk:
+                    stdout_output.append(response.stdout_chunk)
+                    print(response.stdout_chunk, end="", flush=True)
+                if response.stderr_chunk:
+                    stderr_output.append(response.stderr_chunk)
+                    print(
+                        f"{COLOR_RED}STDERR: {response.stderr_chunk}{COLOR_RESET}",
+                        end="",
+                        flush=True,
+                    )
+                if response.peak_memory_bytes > 0:
+                    peak_memory = response.peak_memory_bytes
+                if response.execution_time_ms > 0:
+                    execution_time = response.execution_time_ms
+                cache_hit = response.cache_hit
+                if response.cache_hit and response.execution_time_ms > 0:
+                    cached_execution_time = response.execution_time_ms
+                if response.wall_clock_timeout:
+                    wall_clock_timeout = True
+                if response.output_truncated:
+                    output_truncated = True
+        except grpc.RpcError as e:
+            print(f"{COLOR_RED}gRPC Error: {e.details()}{COLOR_RESET}")
+            return ExecutionResult(
+                stdout="".join(stdout_output),
+                stderr=f"gRPC Error: {e.details()}",
+                peak_memory=0,
+                execution_time=0.0,
+                cache_hit=False,
+                actual_time=0.0,
+            )
 
         actual_time = (time.time() - start_time) * 1000
         cache_speedup: float | None = None

@@ -33,8 +33,8 @@
 #include "src/engine/execution_step.h"
 #include "src/engine/execution_strategy.h"
 #include "src/engine/execution_types.h"
+#include "src/engine/language_registry.h"
 #include "src/engine/process_runner.h"
-#include "src/engine/process_timeout_manager.h"
 #include "src/engine/temp_file_manager.h"
 
 ABSL_FLAG(int, sandbox_cpu_time_limit_seconds, 1,
@@ -50,9 +50,7 @@ namespace dcodex {
 
 namespace {
 
-using internal::ProcessRunner;
 using internal::TempFileManager;
-using internal::PipePair;
 
 // --- SRP: Global Cache Management ---
 class CacheHolder {
@@ -62,160 +60,6 @@ class CacheHolder {
     return cache;
   }
 };
-
-ResourceStats ComputeResourceStats(const struct rusage& usage,
-                                   absl::Time start, absl::Time end) {
-  ResourceStats stats;
-#ifdef __APPLE__
-  stats.peak_memory_bytes = usage.ru_maxrss;
-#else
-  stats.peak_memory_bytes = usage.ru_maxrss * 1024;
-#endif
-  stats.user_time_ms =
-      usage.ru_utime.tv_sec * 1000 + usage.ru_utime.tv_usec / 1000;
-  stats.system_time_ms =
-      usage.ru_stime.tv_sec * 1000 + usage.ru_stime.tv_usec / 1000;
-  stats.elapsed_time_ms = absl::ToInt64Milliseconds(end - start);
-  return stats;
-}
-
-// -----------------------------------------------------------------------------
-// SRP: Process Execution Helper
-// Handles low-level process execution with sandboxing support.
-// Now uses gRPC Alarm for timeout instead of fork-based watcher.
-// -----------------------------------------------------------------------------
-
-// Formats the command trace with appropriate coloring.
-void FormatCommandTrace(std::stringstream& trace, bool sandboxed,
-                        absl::string_view context,
-                        absl::string_view cmd_str) {
-  trace << (sandboxed ? "\033[94m[SANDBOX]\033[0m " : "\033[92m[LOCAL]\033[0m ")
-        << context << ": " << cmd_str << "\n";
-}
-
-// Creates pipe pairs for stdin, stdout, and stderr.
-absl::Status CreatePipes(PipePair& stdin_p, PipePair& stdout_p,
-                         PipePair& stderr_p, std::stringstream& trace) {
-  if (!stdin_p.Create() || !stdout_p.Create() || !stderr_p.Create()) {
-    trace << "[FAIL] Pipe creation failed\n";
-    return absl::InternalError("Pipe creation failed");
-  }
-  return absl::OkStatus();
-}
-
-// Writes input data to the stdin pipe.
-void FeedStdin(PipePair& stdin_p, absl::string_view input,
-               std::stringstream& trace) {
-  if (!input.empty()) {
-    trace << absl::StrFormat("[INFO] Feeding %zu bytes to stdin\n", input.size());
-    write(stdin_p.WriteFd(), input.data(), input.size());
-  }
-  stdin_p.CloseWrite();
-}
-
-// Formats the process exit error message.
-std::string FormatProcessError(int status) {
-  if (WIFEXITED(status)) {
-    return absl::StrFormat("Process exited with non-zero status: %d",
-                           WEXITSTATUS(status));
-  }
-  if (WIFSIGNALED(status)) {
-    return absl::StrFormat("Process killed by signal: %d", WTERMSIG(status));
-  }
-  return "Process failed for unknown reasons";
-}
-
-// Builds the execution result from process status and resource usage.
-ExecutionResult BuildExecutionResult(int status, const struct rusage& usage,
-                                     absl::Time start, bool timed_out,
-                                     bool truncated) {
-  ExecutionResult res;
-  res.stats = ComputeResourceStats(usage, start, absl::Now());
-  res.wall_clock_timeout = timed_out;
-  res.output_truncated = truncated;
-  res.success = !truncated && !timed_out && WIFEXITED(status) &&
-                WEXITSTATUS(status) == 0;
-
-  if (timed_out) {
-    res.error_message = "Wall-clock timeout exceeded";
-  } else if (truncated) {
-    res.error_message = "Output truncated";
-  } else if (!res.success) {
-    res.error_message = FormatProcessError(status);
-  }
-  return res;
-}
-
-absl::StatusOr<ExecutionResult> RunCommandWithSandbox(
-    absl::string_view context, const std::vector<std::string>& argv,
-    absl::string_view input, bool sandboxed, OutputCallback callback,
-    std::stringstream& trace) {
-  const std::string cmd_str = absl::StrJoin(argv, " ");
-  FormatCommandTrace(trace, sandboxed, context, cmd_str);
-  LOG(INFO) << (sandboxed ? "Sandboxed" : "Local") << " exec: " << cmd_str;
-
-  PipePair stdin_p, stdout_p, stderr_p;
-  absl::Status pipe_status = CreatePipes(stdin_p, stdout_p, stderr_p, trace);
-  if (!pipe_status.ok()) {
-    return pipe_status;
-  }
-
-  const absl::Time start = absl::Now();
-  
-  // Use posix_spawn for efficient process creation
-  absl::StatusOr<pid_t> spawn_result = ProcessRunner::SpawnProcess(
-      absl::MakeSpan(argv),
-      stdin_p.ReadFd(),
-      stdout_p.WriteFd(),
-      stderr_p.WriteFd(),
-      sandboxed);
-  
-  if (!spawn_result.ok()) {
-    trace << "[FAIL] Failed to spawn process: " << spawn_result.status().message() << "\n";
-    return spawn_result.status();
-  }
-  
-  const pid_t pid = *spawn_result;
-
-  stdin_p.CloseRead();
-  stdout_p.CloseWrite();
-  stderr_p.CloseWrite();
-  FeedStdin(stdin_p, input, trace);
-
-  // Use gRPC Alarm-based timeout manager instead of fork-based watcher
-  std::atomic<bool> timed_out_flag{false};
-  std::unique_ptr<ProcessTimeoutManager> timeout_manager;
-
-  if (sandboxed) {
-    const absl::Duration timeout = absl::Seconds(
-        absl::GetFlag(FLAGS_sandbox_wall_clock_timeout_seconds));
-    timeout_manager = std::make_unique<ProcessTimeoutManager>(
-        pid, timeout, [&timed_out_flag, pid]() {
-          timed_out_flag.store(true);
-          if (kill(pid, 0) == 0) {
-            kill(pid, SIGKILL);
-          }
-        });
-    timeout_manager->Start();
-    trace << absl::StrFormat("[INFO] gRPC Alarm timeout armed for %ld seconds\n",
-                             absl::ToInt64Seconds(timeout));
-  }
-
-  bool truncated = false;
-  ProcessRunner::ReadOutput(stdout_p.ReadFd(), stderr_p.ReadFd(), pid, callback,
-                            truncated);
-
-  if (timeout_manager) {
-    timeout_manager->Cancel();
-  }
-
-  int status = 0;
-  struct rusage usage {};
-  wait4(pid, &status, 0, &usage);
-
-  return BuildExecutionResult(status, usage, start, timed_out_flag.load(),
-                              truncated);
-}
 
 // Formats the result trace with appropriate coloring based on status.
 void FormatResultTrace(std::stringstream& trace, absl::string_view context,
@@ -258,79 +102,6 @@ absl::StatusOr<ExecutionResult> HandleExecutionResult(
 }
 
 }  // namespace
-
-// -----------------------------------------------------------------------------
-// ProcessTimeoutManager Implementation
-// -----------------------------------------------------------------------------
-
-struct ProcessTimeoutState {
-  ProcessTimeoutState(absl::Duration timeout, ProcessTimeoutManager::TimeoutCallback callback)
-      : timeout(timeout), callback(std::move(callback)) {}
-
-  absl::Duration timeout;
-  ProcessTimeoutManager::TimeoutCallback callback;
-  grpc::Alarm alarm;
-  std::mutex mutex;
-  bool started = false;
-  bool triggered = false;
-  bool cancelled = false;
-};
-
-ProcessTimeoutManager::ProcessTimeoutManager(pid_t pid, absl::Duration timeout,
-                                             TimeoutCallback callback)
-    : timeout_(timeout), callback_(std::move(callback)) {
-  (void)pid;
-  state_ = std::make_shared<ProcessTimeoutState>(timeout, std::move(callback_));
-}
-
-ProcessTimeoutManager::~ProcessTimeoutManager() { Cancel(); }
-
-void ProcessTimeoutManager::Start() {
-  std::lock_guard<std::mutex> lock(state_->mutex);
-  if (state_->started || state_->cancelled) {
-    return;
-  }
-  state_->started = true;
-
-  auto deadline = absl::ToChronoTime(absl::Now() + state_->timeout);
-  
-  state_->alarm.Set(deadline, [state = state_](bool ok) {
-    {
-      std::lock_guard<std::mutex> lock(state->mutex);
-      if (state->cancelled || !ok) {
-        return;
-      }
-      state->triggered = true;
-    }
-    if (state->callback) {
-      state->callback();
-    }
-  });
-}
-
-void ProcessTimeoutManager::Cancel() {
-  std::lock_guard<std::mutex> lock(state_->mutex);
-  if (state_->cancelled || state_->triggered) {
-    return;
-  }
-  state_->cancelled = true;
-  state_->alarm.Cancel();
-}
-
-bool ProcessTimeoutManager::IsTriggered() const {
-  std::lock_guard<std::mutex> lock(state_->mutex);
-  return state_->triggered;
-}
-
-bool ProcessTimeoutManager::IsCancelled() const {
-  std::lock_guard<std::mutex> lock(state_->mutex);
-  return state_->cancelled;
-}
-
-void ProcessTimeoutManager::OnAlarmTriggered(bool ok) {
-  // This is no longer used as we use a lambda in Start()
-  (void)ok;
-}
 
 // -----------------------------------------------------------------------------
 // ExecutionPipeline Implementation
@@ -398,7 +169,7 @@ absl::Status CompileStep::Execute(ExecutionContext& context) {
 
   // First compile attempt (null callback to suppress output)
   auto null_cb = [](absl::string_view, absl::string_view) {};
-  absl::StatusOr<ExecutionResult> comp_res = RunCommandWithSandbox(
+  absl::StatusOr<ExecutionResult> comp_res = context.executor.RunCommand(
       "Compile", argv, "", false, null_cb, context.trace);
   if (!comp_res.ok()) {
     return comp_res.status();
@@ -413,7 +184,7 @@ absl::Status CompileStep::Execute(ExecutionContext& context) {
   if (!handled_res->success) {
     context.trace << "[FAIL] Compilation failed - capturing detailed errors\n";
     // Re-run with actual callback to capture error output
-    absl::StatusOr<ExecutionResult> err_res = RunCommandWithSandbox(
+    absl::StatusOr<ExecutionResult> err_res = context.executor.RunCommand(
         "Compile", argv, "", false, context.callback, context.trace);
     if (!err_res.ok()) {
       return err_res.status();
@@ -456,7 +227,7 @@ absl::Status RunProcessStep::Execute(ExecutionContext& context) {
     }
   }
 
-  absl::StatusOr<ExecutionResult> run_res = RunCommandWithSandbox(
+  absl::StatusOr<ExecutionResult> run_res = context.executor.RunCommand(
       "Run", argv, context.stdin_data, sandboxed_, context.callback,
       context.trace);
   if (!run_res.ok()) {
@@ -484,17 +255,13 @@ absl::Status FinalizeResultStep::Execute(ExecutionContext& context) {
 
 // -----------------------------------------------------------------------------
 // CompiledLanguageStrategy Implementation
-// Supports both C and C++ compilation with appropriate compiler selection.
 // -----------------------------------------------------------------------------
 CompiledLanguageStrategy::CompiledLanguageStrategy(
     Language language, std::shared_ptr<CacheInterface> cache)
     : language_(language), cache_(std::move(cache)) {}
 
 absl::StatusOr<ExecutionResult> CompiledLanguageStrategy::Execute(
-    absl::string_view code, absl::string_view stdin_data,
-    OutputCallback callback) {
-  ExecutionContext context(code, stdin_data, std::move(callback));
-  
+    ExecutionContext& context) {
   auto pipeline = CreatePipeline(cache_);
   return pipeline->Run(context);
 }
@@ -518,10 +285,7 @@ PythonExecutionStrategy::PythonExecutionStrategy(
     : cache_(std::move(cache)) {}
 
 absl::StatusOr<ExecutionResult> PythonExecutionStrategy::Execute(
-    absl::string_view code, absl::string_view stdin_data,
-    OutputCallback callback) {
-  ExecutionContext context(code, stdin_data, std::move(callback));
-  
+    ExecutionContext& context) {
   auto pipeline = CreatePipeline(cache_);
   return pipeline->Run(context);
 }
@@ -535,24 +299,67 @@ std::unique_ptr<ExecutionPipeline> PythonExecutionStrategy::CreatePipeline(
   return pipeline;
 }
 
+// -----------------------------------------------------------------------------
+// Language Registration (The "Extensibility" Demo)
+// -----------------------------------------------------------------------------
+
+namespace {
+struct RegistrationInit {
+  RegistrationInit() {
+    auto& registry = LanguageRegistry::Get();
+    
+    registry.Register(".c", [](auto cache) {
+      return std::make_unique<CExecutionStrategy>(std::move(cache));
+    });
+    registry.Register("c", [](auto cache) {
+      return std::make_unique<CExecutionStrategy>(std::move(cache));
+    });
+    
+    registry.Register(".cpp", [](auto cache) {
+      return std::make_unique<CppExecutionStrategy>(std::move(cache));
+    });
+    registry.Register("cpp", [](auto cache) {
+      return std::make_unique<CppExecutionStrategy>(std::move(cache));
+    });
+    
+    registry.Register(".py", [](auto cache) {
+      return std::make_unique<PythonExecutionStrategy>(std::move(cache));
+    });
+    registry.Register("python", [](auto cache) {
+      return std::make_unique<PythonExecutionStrategy>(std::move(cache));
+    });
+
+    // Dummy strategy for demo purposes
+    class DummyExecutionStrategy final : public ExecutionStrategy {
+     public:
+      explicit DummyExecutionStrategy(std::shared_ptr<CacheInterface> cache) {}
+      absl::StatusOr<ExecutionResult> Execute(
+          ExecutionContext& context) override {
+        context.callback(absl::StrCat("[DUMMY ECHO] ", context.code.substr(0, 50), "...\n"), "");
+        ExecutionResult res;
+        res.success = true;
+        return res;
+      }
+      absl::string_view GetStrategyId() const override { return "dummy"; }
+     protected:
+      std::unique_ptr<ExecutionPipeline> CreatePipeline(
+          std::shared_ptr<CacheInterface> cache) override {
+        return nullptr;
+      }
+    };
+
+    registry.Register("dummy", [](auto cache) {
+      return std::make_unique<DummyExecutionStrategy>(std::move(cache));
+    });
+  }
+} g_registry_init;
+} // namespace
+
 // --- ExecutionStrategy Factory ---
 absl::StatusOr<std::unique_ptr<ExecutionStrategy>> ExecutionStrategy::Create(
     absl::string_view filename_or_extension,
     std::shared_ptr<CacheInterface> cache) {
-  // Check for Python
-  if (absl::EndsWith(filename_or_extension, ".py") ||
-      filename_or_extension == "python") {
-    return std::make_unique<PythonExecutionStrategy>(std::move(cache));
-  }
-  
-  // Check for C
-  if (absl::EndsWith(filename_or_extension, ".c") ||
-      filename_or_extension == "c") {
-    return std::make_unique<CExecutionStrategy>(std::move(cache));
-  }
-  
-  // Default to C++ for .cpp, .cc, .cxx, or unknown
-  return std::make_unique<CppExecutionStrategy>(std::move(cache));
+  return LanguageRegistry::Get().CreateStrategy(filename_or_extension, std::move(cache));
 }
 
 // --- SandboxedProcess Implementation ---
@@ -562,7 +369,8 @@ void SandboxedProcess::ClearCache() { CacheHolder::Get().Clear(); }
 absl::StatusOr<ExecutionResult> SandboxedProcess::CompileAndRunStreaming(
     absl::string_view filename_or_extension, absl::string_view code,
     absl::string_view stdin_data, OutputCallback callback,
-    std::shared_ptr<CacheInterface> cache) {
+    std::shared_ptr<CacheInterface> cache,
+    ResourcePolicy policy) {
   // Use global cache if no cache provided
   std::shared_ptr<CacheInterface> effective_cache = cache ? cache : std::shared_ptr<CacheInterface>(&GetCache(), [](CacheInterface*){});
   
@@ -608,8 +416,10 @@ absl::StatusOr<ExecutionResult> SandboxedProcess::CompileAndRunStreaming(
     callback(o, e);
   };
 
-  absl::StatusOr<ExecutionResult> result =
-      strategy->Execute(code, stdin_data, wrapped_cb);
+  // Create context with policy
+  ExecutionContext context(code, stdin_data, std::move(wrapped_cb), std::move(policy));
+
+  absl::StatusOr<ExecutionResult> result = strategy->Execute(context);
 
   if (!result.ok()) {
     return result;

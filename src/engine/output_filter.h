@@ -15,29 +15,69 @@
 #ifndef SRC_ENGINE_OUTPUT_FILTER_H_
 #define SRC_ENGINE_OUTPUT_FILTER_H_
 
+#include <string>
+#include <vector>
+#include <regex>
+
 #include "absl/strings/string_view.h"
 
-namespace dcodex::internal {
+namespace dcodex {
 
-class OutputFilterStrategy {
+// Interface for output filtering strategies.
+class OutputFilter {
  public:
-  virtual ~OutputFilterStrategy() = default;
+  virtual ~OutputFilter() = default;
+
+  // Processes a chunk of output.
+  // Returns the processed (possibly modified or empty) chunk.
+  virtual std::string Process(absl::string_view chunk) const = 0;
+
+  // Returns true if the chunk should be completely suppressed.
   virtual bool ShouldSuppress(absl::string_view chunk) const = 0;
 };
 
-class DefaultOutputFilterStrategy final : public OutputFilterStrategy {
+// Simple filter that redacts sensitive information using regex.
+class RedactionFilter final : public OutputFilter {
  public:
+  void AddRule(const std::string& pattern, const std::string& replacement) {
+    rules_.emplace_back(std::regex(pattern), replacement);
+  }
+
+  std::string Process(absl::string_view chunk) const override {
+    std::string result(chunk);
+    for (const auto& [re, replacement] : rules_) {
+      result = std::regex_replace(result, re, replacement);
+    }
+    return result;
+  }
+
   bool ShouldSuppress(absl::string_view chunk) const override {
-    // Disabled filtering for debugging to see all Rosetta output.
+    return false;
+  }
+
+ private:
+  std::vector<std::pair<std::regex, std::string>> rules_;
+};
+
+// Default filter that does nothing (pass-through).
+class PassThroughFilter final : public OutputFilter {
+ public:
+  std::string Process(absl::string_view chunk) const override {
+    return std::string(chunk);
+  }
+  bool ShouldSuppress(absl::string_view chunk) const override {
     return false;
   }
 };
 
-inline const OutputFilterStrategy& GetOutputFilter() {
-  static DefaultOutputFilterStrategy filter;
+namespace internal {
+// Registry for the global output filter.
+inline const OutputFilter& GetOutputFilter() {
+  static PassThroughFilter filter;
   return filter;
 }
+}  // namespace internal
 
-}  // namespace dcodex::internal
+}  // namespace dcodex
 
 #endif  // SRC_ENGINE_OUTPUT_FILTER_H_

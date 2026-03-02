@@ -55,12 +55,8 @@ class InteractiveMode:
         self._example_generator = example_generator or ExampleGenerator()
         self._file_manager = file_manager or FileManager()
 
-    def run(self, stub: CodeExecutorStub) -> None:
-        """Run interactive mode.
-
-        Args:
-            stub: gRPC stub for the CodeExecutor service.
-        """
+    def run(self) -> None:
+        """Run interactive mode."""
         print("\n" + "=" * 60)
         print(f"{COLOR_CYAN}{COLOR_BOLD}DCodeX Python Client - Interactive Mode{COLOR_RESET}")
         print("=" * 60)
@@ -98,7 +94,6 @@ class InteractiveMode:
             print(f"\n{COLOR_CYAN}Detected language: {language}{COLOR_RESET}")
             print("-" * 50)
 
-            self._grpc_client.set_stub(stub)
             try:
                 result = self._grpc_client.execute_code(code, language)
                 ResultPrinter().print_results(result)
@@ -153,12 +148,8 @@ class ExampleRunner:
         self._executor = executor or Executor(grpc_client)
         self._example_generator = example_generator or ExampleGenerator()
 
-    def run_all(self, stub: CodeExecutorStub) -> None:
-        """Run all default examples.
-
-        Args:
-            stub: gRPC stub for the CodeExecutor service.
-        """
+    def run_all(self) -> None:
+        """Run all default examples."""
         examples_dir = Path("examples")
         self._example_generator.create_examples_directory(examples_dir)
 
@@ -168,7 +159,6 @@ class ExampleRunner:
         print("🚀" * 30)
 
         self._executor.execute_codes_from_directory(
-            stub,
             examples_dir,
             repeat_for_cache_demo=True,
         )

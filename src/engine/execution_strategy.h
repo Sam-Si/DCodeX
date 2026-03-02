@@ -36,9 +36,9 @@ class ExecutionStrategy {
   virtual ~ExecutionStrategy() = default;
 
   // Executes the given code and returns the result or an error status.
+  // Now takes ExecutionContext to allow for policy-based execution.
   [[nodiscard]] virtual absl::StatusOr<ExecutionResult> Execute(
-      absl::string_view code, absl::string_view stdin_data,
-      OutputCallback callback) = 0;
+      ExecutionContext& context) = 0;
 
   // Returns a unique identifier for this strategy (used for caching).
   [[nodiscard]] virtual absl::string_view GetStrategyId() const = 0;
@@ -70,8 +70,7 @@ class CompiledLanguageStrategy : public ExecutionStrategy {
   ~CompiledLanguageStrategy() override = default;
 
   [[nodiscard]] absl::StatusOr<ExecutionResult> Execute(
-      absl::string_view code, absl::string_view stdin_data,
-      OutputCallback callback) override;
+      ExecutionContext& context) override;
 
   [[nodiscard]] absl::string_view GetStrategyId() const override {
     return language_ == Language::kC ? "c" : "cpp";
@@ -128,8 +127,7 @@ class PythonExecutionStrategy final : public ExecutionStrategy {
   ~PythonExecutionStrategy() override = default;
 
   [[nodiscard]] absl::StatusOr<ExecutionResult> Execute(
-      absl::string_view code, absl::string_view stdin_data,
-      OutputCallback callback) override;
+      ExecutionContext& context) override;
 
   [[nodiscard]] absl::string_view GetStrategyId() const override { return "python"; }
 

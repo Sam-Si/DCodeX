@@ -23,6 +23,7 @@ from python_client.formatter import (
     COLOR_BOLD,
     COLOR_CYAN,
     COLOR_GREEN,
+    COLOR_RESET,
     COLOR_WHITE,
     COLOR_YELLOW,
 )
@@ -54,55 +55,77 @@ class Executor:
         self._result_printer = result_printer or ResultPrinter()
         self._language_detector = language_detector or LanguageDetector()
 
+    def execute_file(
+            self,
+            file_path: Path,
+            stdin: str = "",
+            policy: str = "default",
+            language: str | None = None,
+    ) -> None:
+        """Execute a single code file.
+
+        Args:
+            file_path: Path to the source file to execute.
+            stdin: Optional stdin data for execution.
+            policy: Optional execution policy.
+            language: Optional language override.
+        """
+        code = self._file_manager.read_code_from_file(file_path)
+        if language is None:
+            language = self._language_detector.detect_from_file(file_path)
+        
+        print(f"\n📝 {file_path.name} (Policy: {policy}, Language: {language})")
+        print("=" * 50)
+        
+        results = self._grpc_client.execute_code(
+            code,
+            language,
+            file_path.stem,
+            stdin_data=stdin,
+            policy=policy,
+        )
+        self._result_printer.print_results(results)
+
     def execute_single_code(
             self,
-            stub: CodeExecutorStub,
             file_path: Path,
             stdin_data: str = "",
+            policy: str = "default",
+            language: str | None = None,
     ) -> None:
         """Execute a single code example and print results.
 
         Language is automatically detected from the file extension.
 
         Args:
-            stub: gRPC stub for the CodeExecutor service.
             file_path: Path to the source file to execute.
             stdin_data: Data to feed to the program's standard input.
+            policy: Optional execution policy.
+            language: Optional language override.
         """
-        code = self._file_manager.read_code_from_file(file_path)
-        language = self._language_detector.detect_from_file(file_path)
-        name = file_path.stem
-
-        print(f"\n📝 {name}")
-        print("=" * 50)
-
-        self._grpc_client.set_stub(stub)
-        results = self._grpc_client.execute_code(
-            code,
-            language,
-            name,
-            stdin_data=stdin_data,
-        )
-        self._result_printer.print_results(results)
+        self.execute_file(file_path, stdin=stdin_data, policy=policy, language=language)
 
     def execute_codes_from_directory(
             self,
-            stub: CodeExecutorStub,
             directory: Path,
             repeat_for_cache_demo: bool = False,
+            policy: str = "default",
+            language: str | None = None,
     ) -> None:
         """Execute all code files from a directory.
 
         Language is automatically detected from the directory name.
 
         Args:
-            stub: gRPC stub for the CodeExecutor service.
             directory: Path to the directory containing code files.
             repeat_for_cache_demo: Whether to run each file twice to
                 demonstrate caching.
+            policy: Optional execution policy.
+            language: Optional language override.
         """
         codes = self._file_manager.read_codes_from_directory(directory)
-        language = self._language_detector.detect_from_directory(directory)
+        if language is None:
+            language = self._language_detector.detect_from_directory(directory)
 
         # Determine extension for error message
         extensions = self._language_detector.get_extensions(language)
@@ -113,17 +136,18 @@ class Executor:
             return
 
         print(
-            f"\n{COLOR_CYAN}📁 Found {len(codes)} code file(s) in {directory}{COLOR_RESET}"
+            f"\n{COLOR_CYAN}📁 Found {len(codes)} code file(s) in {directory} (Policy: {policy}, Language: {language}){COLOR_RESET}"
         )
         print("=" * 60)
 
-        self._grpc_client.set_stub(stub)
-
         for name, (code, file_language) in codes.items():
+            # Use explicit language if provided, otherwise use detected file language
+            run_language = language if language else file_language
+            
             print(f"\n{COLOR_WHITE}{COLOR_BOLD}🔴 {name} - First Run{COLOR_RESET}")
             print("-" * 60)
             results1 = self._grpc_client.execute_code(
-                code, file_language, name
+                code, run_language, name, policy=policy
             )
             self._result_printer.print_results(results1)
 
@@ -136,8 +160,9 @@ class Executor:
                 print("-" * 60)
                 results2 = self._grpc_client.execute_code(
                     code,
-                    file_language,
+                    run_language,
                     f"{name} - cached",
+                    policy=policy,
                 )
                 self._result_printer.print_results(results2)
 

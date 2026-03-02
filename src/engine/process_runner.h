@@ -40,7 +40,6 @@
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "src/engine/output_filter.h"
-#include "src/engine/sandbox.h"
 
 extern char **environ;
 
@@ -258,38 +257,7 @@ class ProcessRunner {
           absl::StrFormat("posix_spawnp failed for '%s'", c_argv[0]));
     }
 
-    // If sandboxed, apply resource limits to the spawned process
-    // Note: This is a best-effort approach. For proper sandboxing,
-    // we'd need to use fork+exec or a more sophisticated mechanism.
-    if (sandboxed && pid > 0) {
-      ApplyResourceLimitsToProcess(pid);
-    }
-
     return pid;
-  }
-
-  /// Applies resource limits to a running process (best-effort).
-  static void ApplyResourceLimitsToProcess(pid_t pid) {
-    // Note: We cannot directly setrlimit for another process.
-    // For proper sandboxing, we'd need to use prctl or cgroups.
-    // This is a placeholder for future enhancement.
-    (void)pid;  // Suppress unused parameter warning
-  }
-
-  /// Applies resource limits (CPU time, memory) for sandboxed execution.
-  /// Call this in the child process after fork but before exec.
-  static void ApplyResourceLimits() {
-    const int cpu_limit_secs =
-        absl::GetFlag(FLAGS_sandbox_cpu_time_limit_seconds);
-    const struct rlimit cpu_limit{static_cast<rlim_t>(cpu_limit_secs),
-                                   static_cast<rlim_t>(cpu_limit_secs)};
-    setrlimit(RLIMIT_CPU, &cpu_limit);
-
-    const uint64_t mem_limit_bytes =
-        absl::GetFlag(FLAGS_sandbox_memory_limit_bytes);
-    const struct rlimit mem_limit{static_cast<rlim_t>(mem_limit_bytes),
-                                   static_cast<rlim_t>(mem_limit_bytes)};
-    setrlimit(RLIMIT_AS, &mem_limit);
   }
 
   /// Reads output from stdout and stderr pipes using efficient I/O multiplexing.
@@ -429,8 +397,9 @@ class ProcessRunner {
       if (is_stdout) {
         callback(chunk, "");
       } else {
-        if (!GetOutputFilter().ShouldSuppress(chunk)) {
-          callback("", chunk);
+        std::string processed = GetOutputFilter().Process(chunk);
+        if (!processed.empty()) {
+          callback("", processed);
         }
       }
     }

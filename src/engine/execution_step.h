@@ -24,6 +24,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "src/engine/execution_types.h"
+#include "src/engine/sandbox_executor.h"
 
 namespace dcodex {
 
@@ -68,12 +69,15 @@ class ExecutionContext {
 
   // Configuration
   bool sandboxed = true;
+  SandboxExecutor executor;
 
   ExecutionContext(absl::string_view code, absl::string_view stdin_data,
-                   OutputCallback callback)
+                   OutputCallback callback, 
+                   ResourcePolicy policy = ResourcePolicy::FromFlags())
       : code(code),
         stdin_data(stdin_data),
-        callback(std::move(callback)) {
+        callback(std::move(callback)),
+        executor(std::move(policy)) {
     trace << "--- Backend Execution Trace ---\n";
   }
 
