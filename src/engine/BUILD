@@ -11,84 +11,13 @@ cc_library(
 )
 
 cc_library(
-    name = "resource_policy",
-    hdrs = ["resource_policy.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/time",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "sandbox_interface",
-    hdrs = ["sandbox.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        ":execution_types",
-        "//src/common:execution_cache",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "language_registry",
-    hdrs = ["language_registry.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        ":execution_strategy",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "sandbox_executor",
-    srcs = ["sandbox_executor.cpp"],
-    hdrs = ["sandbox_executor.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        ":execution_types",
-        ":resource_policy",
-        ":process_timeout_manager",
-        ":process_runner_lib",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/time",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "process_runner_lib",
-    hdrs = ["process_runner.h", "output_filter.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        ":execution_types",
-        ":sandbox_interface",
-        "//src/common:execution_cache",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/types:span",
-    ],
-)
-
-cc_library(
     name = "execution_step",
     hdrs = ["execution_step.h"],
     copts = ["-std=c++23"],
     deps = [
         ":execution_types",
-        ":sandbox_executor",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
     ],
     visibility = ["//visibility:public"],
@@ -123,7 +52,6 @@ cc_library(
 
 cc_library(
     name = "process_timeout_manager",
-    srcs = ["process_timeout_manager.cpp"],
     hdrs = ["process_timeout_manager.h"],
     copts = ["-std=c++23"],
     deps = [
@@ -143,11 +71,7 @@ cc_library(
         ":execution_step",
         ":execution_strategy",
         ":execution_types",
-        ":language_registry",
         ":process_timeout_manager",
-        ":resource_policy",
-        ":sandbox_executor",
-        ":sandbox_interface",
         "//src/common:execution_cache",
         "//proto:sandbox_cc_grpc",
         "@com_github_grpc_grpc//:grpc++_unsecure",
@@ -156,6 +80,7 @@ cc_library(
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",

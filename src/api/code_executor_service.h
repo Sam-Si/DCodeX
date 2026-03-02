@@ -31,7 +31,7 @@ class RejectReactor;
 
 class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
  public:
-  explicit CodeExecutorServiceImpl(int max_sandboxes);
+  explicit CodeExecutorServiceImpl(int max_sandboxes, std::shared_ptr<CacheInterface> cache);
   ~CodeExecutorServiceImpl() override;
 
   grpc::ServerWriteReactor<ExecutionLog>* Execute(
@@ -43,6 +43,7 @@ class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
  private:
   std::atomic<int> active_sandboxes_;
   WarmWorkerPool worker_pool_;
+  std::shared_ptr<SandboxedProcess> executor_;
 
   mutable absl::Mutex reject_mutex_;
   absl::flat_hash_map<const RejectReactor*, std::shared_ptr<RejectReactor>>

@@ -23,6 +23,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/substitute.h"
 #include "src/api/code_executor_service.h"
+#include "src/common/execution_cache.h"
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 ABSL_FLAG(int, max_concurrent_sandboxes, 10,
@@ -33,7 +34,8 @@ namespace dcodex {
 absl::Status RunServer() {
   EnsureSingleInstance();
   std::string server_address = absl::Substitute("0.0.0.0:$0", absl::GetFlag(FLAGS_port));
-  CodeExecutorServiceImpl service(absl::GetFlag(FLAGS_max_concurrent_sandboxes));
+  auto cache = std::make_shared<ExecutionCache>(absl::Hours(1), 1000);
+  CodeExecutorServiceImpl service(absl::GetFlag(FLAGS_max_concurrent_sandboxes), std::move(cache));
   
   grpc::ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
@@ -50,7 +52,8 @@ absl::Status RunServer() {
 int main(int argc, char** argv) {
   absl::InitializeLog();
   absl::ParseCommandLine(argc, argv);
-  if (absl::Status status = dcodex::RunServer(); !status.ok()) {
+  const absl::Status status = dcodex::RunServer();
+  if (!status.ok()) {
     LOG(ERROR) << "Server failed: " << status.message();
     return 1;
   }

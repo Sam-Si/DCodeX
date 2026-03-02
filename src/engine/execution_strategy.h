@@ -36,9 +36,9 @@ class ExecutionStrategy {
   virtual ~ExecutionStrategy() = default;
 
   // Executes the given code and returns the result or an error status.
-  // Now takes ExecutionContext to allow for policy-based execution.
   [[nodiscard]] virtual absl::StatusOr<ExecutionResult> Execute(
-      ExecutionContext& context) = 0;
+      absl::string_view code, absl::string_view stdin_data,
+      OutputCallback callback) = 0;
 
   // Returns a unique identifier for this strategy (used for caching).
   [[nodiscard]] virtual absl::string_view GetStrategyId() const = 0;
@@ -70,7 +70,8 @@ class CompiledLanguageStrategy : public ExecutionStrategy {
   ~CompiledLanguageStrategy() override = default;
 
   [[nodiscard]] absl::StatusOr<ExecutionResult> Execute(
-      ExecutionContext& context) override;
+      absl::string_view code, absl::string_view stdin_data,
+      OutputCallback callback) override;
 
   [[nodiscard]] absl::string_view GetStrategyId() const override {
     return language_ == Language::kC ? "c" : "cpp";
@@ -107,33 +108,31 @@ class CompiledLanguageStrategy : public ExecutionStrategy {
 // Uses clang for compilation.
 class CExecutionStrategy final : public CompiledLanguageStrategy {
  public:
-  explicit CExecutionStrategy(std::shared_ptr<CacheInterface> cache = nullptr)
-      : CompiledLanguageStrategy(Language::kC, std::move(cache)) {}
+  explicit CExecutionStrategy(std::shared_ptr<CacheInterface> cache);
 };
 
 // C++ implementation of the ExecutionStrategy.
 // Uses clang++ for compilation.
 class CppExecutionStrategy final : public CompiledLanguageStrategy {
  public:
-  explicit CppExecutionStrategy(std::shared_ptr<CacheInterface> cache = nullptr)
-      : CompiledLanguageStrategy(Language::kCpp, std::move(cache)) {}
+  explicit CppExecutionStrategy(std::shared_ptr<CacheInterface> cache);
 };
 
 // Python implementation of the ExecutionStrategy.
 class PythonExecutionStrategy final : public ExecutionStrategy {
  public:
-  explicit PythonExecutionStrategy(
-      std::shared_ptr<CacheInterface> cache = nullptr);
+  explicit PythonExecutionStrategy(std::shared_ptr<CacheInterface> cache);
   ~PythonExecutionStrategy() override = default;
 
   [[nodiscard]] absl::StatusOr<ExecutionResult> Execute(
-      ExecutionContext& context) override;
+      absl::string_view code, absl::string_view stdin_data,
+      OutputCallback callback) override;
 
-  [[nodiscard]] absl::string_view GetStrategyId() const override { return "python"; }
+  [[nodiscard]] absl::string_view GetStrategyId() const override;
 
  protected:
   [[nodiscard]] std::unique_ptr<ExecutionPipeline> CreatePipeline(
-      std::shared_ptr<CacheInterface> cache = nullptr) override;
+      std::shared_ptr<CacheInterface> cache) override;
 
  private:
   std::shared_ptr<CacheInterface> cache_;
