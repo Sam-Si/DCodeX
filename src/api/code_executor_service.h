@@ -23,6 +23,8 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
+#include "src/common/execution_cache.h"
+#include "src/engine/sandbox.h"
 #include "src/engine/warm_worker_pool.h"
 
 namespace dcodex {

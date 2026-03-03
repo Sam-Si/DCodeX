@@ -23,6 +23,7 @@ from python_client.formatter import (
     COLOR_BOLD,
     COLOR_CYAN,
     COLOR_GREEN,
+    COLOR_RESET,
     COLOR_WHITE,
     COLOR_YELLOW,
 )

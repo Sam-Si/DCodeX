@@ -16,16 +16,17 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import grpc
 
-# Add paths for proto imports
-sys.path.append(os.path.join(os.path.dirname(__file__), "."))
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+# Ensure the project root is in the path for proto imports
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import proto.sandbox_pb2 as sandbox_pb2
 
