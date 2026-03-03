@@ -48,6 +48,13 @@ build:docker --jobs=9
 build:docker --local_resources=cpu=9
 build:docker --local_resources=memory=32768
 
+# Network-Only Remote Cache (Strictly for Docker)
+build:docker --remote_cache=grpc://host.docker.internal:9092
+build:docker --remote_cache_compression=true
+build:docker --remote_upload_local_results=true
+build:docker --remote_download_regex=.*
+build:docker --disk_cache=
+
 # The "Secret Sauce" for Docker-on-Mac Speed:
 # 1. Disable Sandboxing (Docker is already an isolated environment)
 build:docker --spawn_strategy=local
@@ -55,23 +62,19 @@ build:docker --strategy=CppCompile=local
 build:docker --strategy=Javac=worker
 build:docker --genrule_strategy=local
 
-# 2. Caching & Persistence
-build:docker --disk_cache=/tmp/bazel-disk-cache
+# 2. Performance & Workers
 build:docker --worker_max_instances=8
-
-# 3. Reduce I/O & Link Time
 build:docker --nobuild_runfile_links
 build:docker --action_env=PATH
 build:docker --strip=never
 build:docker --nowatchfs
 
-# 4. ULTRA LINKER & MEMORY (New Additions)
+# 3. ULTRA LINKER & MEMORY
 build:docker --repo_env=CC=clang
 build:docker --repo_env=CXX=clang++
 build:docker --linkopt=-fuse-ld=lld
 build:docker --linkopt=-Wl,--threads=9
 build:docker --gc_thrashing_threshold=90
-build:docker --remote_cache_compression=true
 build:docker --cc_output_directory_tag=docker
 build:docker --nolegacy_external_runfiles
 
@@ -82,7 +85,10 @@ build:macos --jobs=10
 build:macos --cpu=darwin_arm64
 build:macos --macos_cpus=arm64
 build:macos --apple_generate_dsym=false
+
+# Use Local Disk Cache only for macOS Host
 build:macos --disk_cache=~/Library/Caches/bazel-disk-cache
+
 build:macos --copt=-faligned-allocation
 build:macos --copt=-mmacosx-version-min=11.0
 build:macos --linkopt=-mmacosx-version-min=11.0
