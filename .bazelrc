@@ -48,12 +48,12 @@ build:docker --jobs=9
 build:docker --local_resources=cpu=9
 build:docker --local_resources=memory=32768
 
-# Network-Only Cache (No host mounts, writes to host via gRPC)
+# Network-Only Remote Cache (Strictly for Docker)
 build:docker --remote_cache=grpc://host.docker.internal:9092
 build:docker --remote_cache_compression=true
 build:docker --remote_upload_local_results=true
-build:docker --disk_cache=
 build:docker --remote_download_regex=.*
+build:docker --disk_cache=
 
 # The "Secret Sauce" for Docker-on-Mac Speed:
 # 1. Disable Sandboxing (Docker is already an isolated environment)
@@ -86,12 +86,7 @@ build:macos --cpu=darwin_arm64
 build:macos --macos_cpus=arm64
 build:macos --apple_generate_dsym=false
 
-# Remote Cache for Native MacOS (Shared with Docker) - DISABLED
-# build:macos --remote_cache=grpc://localhost:9092
-# build:macos --remote_cache_compression=true
-# build:macos --remote_upload_local_results=true
-
-# Local Disk Cache (Optional second layer for Host)
+# Use Local Disk Cache only for macOS Host
 build:macos --disk_cache=~/Library/Caches/bazel-disk-cache
 
 build:macos --copt=-faligned-allocation
