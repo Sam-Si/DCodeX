@@ -22,7 +22,6 @@
 #include "absl/strings/string_view.h"
 #include "src/common/execution_cache.h"
 #include "src/engine/execution_types.h"
-#include "src/engine/resource_policy.h"
 
 // Abseil Flags for sandboxed resource limits (must be in global namespace).
 ABSL_DECLARE_FLAG(int, sandbox_cpu_time_limit_seconds);
@@ -35,19 +34,16 @@ namespace dcodex {
 // Orchestrator class that manages sandboxed execution and caching.
 class SandboxedProcess {
  public:
+  // Constructs with required dependencies.
+  explicit SandboxedProcess(std::shared_ptr<CacheInterface> cache);
+
   // Compiles and runs code with caching support.
-  // Accepts optional cache and resource policy for dependency injection.
-  [[nodiscard]] static absl::StatusOr<ExecutionResult> CompileAndRunStreaming(
+  [[nodiscard]] absl::StatusOr<ExecutionResult> CompileAndRunStreaming(
       absl::string_view filename_or_extension, absl::string_view code,
-      absl::string_view stdin_data, OutputCallback callback,
-      std::shared_ptr<CacheInterface> cache = nullptr,
-      ResourcePolicy policy = ResourcePolicy::FromFlags());
+      absl::string_view stdin_data, OutputCallback callback);
 
-  // Accesses the global execution cache.
-  [[nodiscard]] static ExecutionCache& GetCache();
-
-  // Clears the execution cache.
-  static void ClearCache();
+ private:
+  std::shared_ptr<CacheInterface> cache_;
 };
 
 }  // namespace dcodex
