@@ -12,8 +12,6 @@ message CodeRequest {
   // Optional data to feed to the program's standard input (stdin).
   // If empty, the process receives EOF on stdin immediately.
   string stdin_data = 3;
-  // Execution policy: "strict" or "lax"
-  string policy = 4;
 }
 
 message ExecutionLog {

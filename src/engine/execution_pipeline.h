@@ -37,17 +37,14 @@ class ExecutionPipeline {
   explicit ExecutionPipeline(std::shared_ptr<CacheInterface> cache = nullptr);
 
   // Adds a step to the pipeline. Steps are executed in order.
-  ExecutionPipeline& AddStep(std::unique_ptr<ExecutionStep> step) {
-    steps_.push_back(std::move(step));
-    return *this;
-  }
+  ExecutionPipeline& AddStep(std::unique_ptr<ExecutionStep> step);
 
   // Executes all steps in sequence. Stops on first failure.
   // Returns the final execution result or an error status.
   [[nodiscard]] absl::StatusOr<ExecutionResult> Run(ExecutionContext& context);
 
   // Gets the cache interface (may be nullptr).
-  [[nodiscard]] CacheInterface* GetCache() const { return cache_.get(); }
+  [[nodiscard]] CacheInterface* GetCache() const;
 
  private:
   std::vector<std::unique_ptr<ExecutionStep>> steps_;

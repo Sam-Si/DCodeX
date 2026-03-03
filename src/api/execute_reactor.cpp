@@ -42,23 +42,16 @@ ReactorInternalState::ReactorInternalState(const CodeRequest* req, std::atomic<i
     : request(req), counter(c), reactor(r), state(ReactorState::kIdle) {}
 
 ExecuteReactor::ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter,
-                               WarmWorkerPool* pool)
+                               WarmWorkerPool* pool,
+                               std::shared_ptr<SandboxedProcess> executor)
     : shared_state_(std::make_shared<ReactorInternalState>(request, counter, this)),
-      pool_(pool) {
+      pool_(pool),
+      executor_(std::move(executor)) {
   shared_state_->counter.fetch_add(1);
 }
 
 void ExecuteReactor::StartExecution() {
-  ResourcePolicy policy;
-  if (shared_state_->request->policy() == "strict") {
-    policy = ResourcePolicy::Strict();
-  } else if (shared_state_->request->policy() == "lax") {
-    policy = ResourcePolicy::Lax();
-  } else {
-    policy = ResourcePolicy::FromFlags();
-  }
-
-  absl::StatusOr<ExecutionResult> result = SandboxedProcess::CompileAndRunStreaming(
+  absl::StatusOr<ExecutionResult> result = executor_->CompileAndRunStreaming(
       shared_state_->request->language(), shared_state_->request->code(),
       shared_state_->request->stdin_data(), [state = shared_state_](absl::string_view o,
                                                                    absl::string_view e) {
@@ -72,8 +65,7 @@ void ExecuteReactor::StartExecution() {
           state->notification_pending = true;
         }
         state->notify_cv.Signal();
-      },
-      nullptr, std::move(policy));
+      });
 
   ExecutionResult final_res;
   if (result.ok()) {
