@@ -52,8 +52,6 @@ class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
       reject_reactors_ ABSL_GUARDED_BY(reject_mutex_);
 };
 
-void EnsureSingleInstance();
-
 }  // namespace dcodex
 
 #endif  // SRC_API_CODE_EXECUTOR_SERVICE_H_

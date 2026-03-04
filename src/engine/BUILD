@@ -24,6 +24,21 @@ cc_library(
 )
 
 cc_library(
+    name = "execution_step_decorator",
+    srcs = ["execution_step_decorator.cpp"],
+    hdrs = ["execution_step_decorator.h"],
+    copts = ["-std=c++23"],
+    deps = [
+        ":execution_step",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "execution_pipeline",
     hdrs = ["execution_pipeline.h"],
     copts = ["-std=c++23"],
@@ -37,12 +52,39 @@ cc_library(
 )
 
 cc_library(
+    name = "execution_pipeline_builder",
+    srcs = ["execution_pipeline_builder.cpp"],
+    hdrs = ["execution_pipeline_builder.h"],
+    copts = ["-std=c++23"],
+    deps = [
+        ":execution_pipeline",
+        ":execution_step",
+        "//src/common:execution_cache",
+        "@com_google_absl//absl/strings",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "language_toolchain",
+    srcs = ["language_toolchain.cpp"],
+    hdrs = ["language_toolchain.h"],
+    copts = ["-std=c++23"],
+    deps = [
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "execution_strategy",
     hdrs = ["execution_strategy.h"],
     copts = ["-std=c++23"],
     deps = [
         ":execution_pipeline",
         ":execution_types",
+        ":language_toolchain",
         "//src/common:execution_cache",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -68,9 +110,11 @@ cc_library(
     copts = ["-std=c++23"],
     deps = [
         ":execution_pipeline",
+        ":execution_pipeline_builder",
         ":execution_step",
         ":execution_strategy",
         ":execution_types",
+        ":language_toolchain",
         ":process_timeout_manager",
         "//src/common:execution_cache",
         "//src/common:status_macros",

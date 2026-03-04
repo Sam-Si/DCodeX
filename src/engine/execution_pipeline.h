@@ -27,7 +27,7 @@ namespace dcodex {
 
 // -----------------------------------------------------------------------------
 // Template Method Pattern (GoF): ExecutionPipeline
-// Orchestrates execution steps in a configurable sequence.
+// Orchestrates execution steps in a configurable sequence using Chain of Responsibility.
 // Now accepts CacheInterface via constructor for dependency injection.
 // -----------------------------------------------------------------------------
 class ExecutionPipeline {
@@ -36,10 +36,10 @@ class ExecutionPipeline {
   // If cache is nullptr, caching is disabled.
   explicit ExecutionPipeline(std::shared_ptr<CacheInterface> cache = nullptr);
 
-  // Adds a step to the pipeline. Steps are executed in order.
+  // Adds a step to the pipeline chain. Steps are executed in order.
   ExecutionPipeline& AddStep(std::unique_ptr<ExecutionStep> step);
 
-  // Executes all steps in sequence. Stops on first failure.
+  // Executes the pipeline chain.
   // Returns the final execution result or an error status.
   [[nodiscard]] absl::StatusOr<ExecutionResult> Run(ExecutionContext& context);
 
@@ -47,7 +47,8 @@ class ExecutionPipeline {
   [[nodiscard]] CacheInterface* GetCache() const;
 
  private:
-  std::vector<std::unique_ptr<ExecutionStep>> steps_;
+  std::unique_ptr<ExecutionStep> head_;
+  ExecutionStep* tail_ = nullptr;
   std::shared_ptr<CacheInterface> cache_;
 };
 

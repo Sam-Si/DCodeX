@@ -18,6 +18,21 @@ cc_library(
 )
 
 cc_library(
+    name = "server_instance_manager",
+    srcs = ["server_instance_manager.cpp"],
+    hdrs = ["server_instance_manager.h"],
+    copts = ["-std=c++23"],
+    deps = [
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/synchronization",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "code_executor_service",
     srcs = ["code_executor_service.cpp"],
     hdrs = ["code_executor_service.h"],
@@ -43,6 +58,7 @@ cc_binary(
     copts = ["-std=c++23"],
     deps = [
         ":code_executor_service",
+        ":server_instance_manager",
         "@com_github_grpc_grpc//:grpc++_unsecure",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",

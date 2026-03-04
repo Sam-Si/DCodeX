@@ -33,9 +33,11 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "src/engine/execution_pipeline.h"
+#include "src/engine/execution_pipeline_builder.h"
 #include "src/engine/execution_step.h"
 #include "src/engine/execution_strategy.h"
 #include "src/engine/execution_types.h"
+#include "src/engine/language_toolchain.h"
 #include "src/engine/process_runner.h"
 #include "src/engine/process_timeout_manager.h"
 #include "src/engine/temp_file_manager.h"
@@ -207,7 +209,7 @@ absl::StatusOr<ExecutionResult> RunCommandWithSandbox(
   wait4(process.Get(), &status, 0, &usage);
   
   // Release ownership since we've reaped it
-  process.Release();
+  (void)process.Release();
 
   return BuildExecutionResult(status, usage, start, timed_out_flag.load(),
                               truncated);
@@ -336,7 +338,12 @@ ExecutionPipeline::ExecutionPipeline(std::shared_ptr<CacheInterface> cache)
     : cache_(std::move(cache)) {}
 
 ExecutionPipeline& ExecutionPipeline::AddStep(std::unique_ptr<ExecutionStep> step) {
-  steps_.push_back(std::move(step));
+  if (!head_) {
+    head_ = std::move(step);
+    tail_ = head_.get();
+  } else {
+    tail_ = tail_->SetNext(std::move(step));
+  }
   return *this;
 }
 
@@ -345,23 +352,21 @@ CacheInterface* ExecutionPipeline::GetCache() const {
 }
 
 absl::StatusOr<ExecutionResult> ExecutionPipeline::Run(ExecutionContext& context) {
-  for (const auto& step : steps_) {
-    context.trace << absl::StrFormat("[STEP] %s\n", step->Name());
-    const absl::Status status = step->Execute(context);
-    if (!status.ok()) {
-      context.trace << absl::StrFormat("[FAIL] Step '%s' failed: %s\n",
-                                       step->Name(), status.message());
-      if (context.result.error_message.empty()) {
-        context.result.error_message =
-            absl::StrFormat("Step '%s' failed: %s", step->Name(),
-                            status.message());
-      }
-      context.result.backend_trace = context.trace.str();
-      return status;
-    }
-    context.trace << absl::StrFormat("[OK] Step '%s' completed\n",
-                                     step->Name());
+  if (!head_) {
+    return context.result;
   }
+  
+  const absl::Status status = head_->Execute(context);
+  if (!status.ok()) {
+    // Error handling is now done within the steps or decorators, but we ensure
+    // the result error message is set if it's empty.
+    if (context.result.error_message.empty()) {
+      context.result.error_message = status.message();
+    }
+    context.result.backend_trace = context.trace.str();
+    return status;
+  }
+  
   context.result.backend_trace = context.trace.str();
   return context.result;
 }
@@ -370,7 +375,7 @@ absl::StatusOr<ExecutionResult> ExecutionPipeline::Run(ExecutionContext& context
 // Concrete Execution Steps Implementation
 // -----------------------------------------------------------------------------
 
-absl::Status CreateSourceFileStep::Execute(ExecutionContext& context) {
+absl::Status CreateSourceFileStep::ExecuteStep(ExecutionContext& context) {
   ABSL_ASSIGN_OR_RETURN(context.source_file_path,
                         TempFileManager::WriteTempFile(extension_, context.code));
   context.trace << "[OK] Created source file: " << context.source_file_path
@@ -379,7 +384,7 @@ absl::Status CreateSourceFileStep::Execute(ExecutionContext& context) {
   return absl::OkStatus();
 }
 
-absl::Status CompileStep::Execute(ExecutionContext& context) {
+absl::Status CompileStep::ExecuteStep(ExecutionContext& context) {
   // Build the compile command
   std::vector<std::string> argv = {compiler_};
   for (const auto& flag : compiler_flags_) {
@@ -426,7 +431,7 @@ absl::Status CompileStep::Execute(ExecutionContext& context) {
   return absl::OkStatus();
 }
 
-absl::Status RunProcessStep::Execute(ExecutionContext& context) {
+absl::Status RunProcessStep::ExecuteStep(ExecutionContext& context) {
   std::vector<std::string> argv;
   
   // Determine what to run based on binary_path
@@ -459,7 +464,7 @@ absl::Status RunProcessStep::Execute(ExecutionContext& context) {
   return absl::OkStatus();
 }
 
-absl::Status FinalizeResultStep::Execute(ExecutionContext& context) {
+absl::Status FinalizeResultStep::ExecuteStep(ExecutionContext& context) {
   // Ensure trace is captured in result
   context.result.backend_trace = context.trace.str();
   return absl::OkStatus();
@@ -467,11 +472,12 @@ absl::Status FinalizeResultStep::Execute(ExecutionContext& context) {
 
 // -----------------------------------------------------------------------------
 // CompiledLanguageStrategy Implementation
-// Supports both C and C++ compilation with appropriate compiler selection.
+// Uses LanguageToolchainFactory for compiler/flag configuration.
 // -----------------------------------------------------------------------------
 CompiledLanguageStrategy::CompiledLanguageStrategy(
-    Language language, std::shared_ptr<CacheInterface> cache)
-    : language_(language), cache_(std::move(cache)) {}
+    std::unique_ptr<LanguageToolchainFactory> toolchain,
+    std::shared_ptr<CacheInterface> cache)
+    : toolchain_(std::move(toolchain)), cache_(std::move(cache)) {}
 
 absl::StatusOr<ExecutionResult> CompiledLanguageStrategy::Execute(
     absl::string_view code, absl::string_view stdin_data,
@@ -482,26 +488,30 @@ absl::StatusOr<ExecutionResult> CompiledLanguageStrategy::Execute(
   return pipeline->Run(context);
 }
 
+absl::string_view CompiledLanguageStrategy::GetStrategyId() const {
+  return toolchain_->GetLanguageId();
+}
+
 std::unique_ptr<ExecutionPipeline> CompiledLanguageStrategy::CreatePipeline(
     std::shared_ptr<CacheInterface> cache) {
-  auto pipeline = std::make_unique<ExecutionPipeline>(std::move(cache));
-  pipeline->AddStep(std::make_unique<CreateSourceFileStep>(GetExtension()))
-           .AddStep(std::make_unique<CompileStep>(GetCompiler(), GetStandardFlags()))
-           .AddStep(std::make_unique<RunProcessStep>(true))
-           .AddStep(std::make_unique<FinalizeResultStep>(
-               language_ == Language::kC ? "CExecution" : "CppExecution"));
-  return pipeline;
+  return ExecutionPipelineBuilder()
+      .WithCache(std::move(cache))
+      .AddCreateSourceFileStep(toolchain_->GetFileExtension())
+      .AddCompileStep(toolchain_->GetExecutable(), toolchain_->GetStandardFlags())
+      .AddRunProcessStep(true)
+      .AddFinalizeResultStep(toolchain_->GetLanguageId())
+      .Build();
 }
 
 CExecutionStrategy::CExecutionStrategy(std::shared_ptr<CacheInterface> cache)
-    : CompiledLanguageStrategy(Language::kC, std::move(cache)) {}
+    : CompiledLanguageStrategy(LanguageToolchainFactory::CreateC(), std::move(cache)) {}
 
 CppExecutionStrategy::CppExecutionStrategy(std::shared_ptr<CacheInterface> cache)
-    : CompiledLanguageStrategy(Language::kCpp, std::move(cache)) {}
+    : CompiledLanguageStrategy(LanguageToolchainFactory::CreateCpp(), std::move(cache)) {}
 
 PythonExecutionStrategy::PythonExecutionStrategy(
     std::shared_ptr<CacheInterface> cache)
-    : cache_(std::move(cache)) {}
+    : toolchain_(LanguageToolchainFactory::CreatePython()), cache_(std::move(cache)) {}
 
 absl::StatusOr<ExecutionResult> PythonExecutionStrategy::Execute(
     absl::string_view code, absl::string_view stdin_data,
@@ -512,35 +522,36 @@ absl::StatusOr<ExecutionResult> PythonExecutionStrategy::Execute(
 }
 
 absl::string_view PythonExecutionStrategy::GetStrategyId() const {
-  return "python";
+  return toolchain_->GetLanguageId();
 }
 
 std::unique_ptr<ExecutionPipeline> PythonExecutionStrategy::CreatePipeline(
     std::shared_ptr<CacheInterface> cache) {
-  auto pipeline = std::make_unique<ExecutionPipeline>(std::move(cache));
-  pipeline->AddStep(std::make_unique<CreateSourceFileStep>(".py"))
-           .AddStep(std::make_unique<RunProcessStep>(true))
-           .AddStep(std::make_unique<FinalizeResultStep>("PythonExecution"));
-  return pipeline;
+  return ExecutionPipelineBuilder()
+      .WithCache(std::move(cache))
+      .AddCreateSourceFileStep(toolchain_->GetFileExtension())
+      .AddRunProcessStep(true)
+      .AddFinalizeResultStep(toolchain_->GetLanguageId())
+      .Build();
 }
 
 // --- ExecutionStrategy Factory ---
 absl::StatusOr<std::unique_ptr<ExecutionStrategy>> ExecutionStrategy::Create(
     absl::string_view filename_or_extension,
     std::shared_ptr<CacheInterface> cache) {
-  // Check for Python
-  if (absl::EndsWith(filename_or_extension, ".py") ||
-      filename_or_extension == "python") {
+  // Use LanguageToolchainFactory to determine language type
+  auto toolchain = LanguageToolchainFactory::Create(filename_or_extension);
+  
+  // Create appropriate strategy based on language
+  if (toolchain->GetLanguageId() == "python") {
     return std::make_unique<PythonExecutionStrategy>(std::move(cache));
   }
   
-  // Check for C
-  if (absl::EndsWith(filename_or_extension, ".c") ||
-      filename_or_extension == "c") {
+  if (toolchain->GetLanguageId() == "c") {
     return std::make_unique<CExecutionStrategy>(std::move(cache));
   }
   
-  // Default to C++ for .cpp, .cc, .cxx, or unknown
+  // Default to C++
   return std::make_unique<CppExecutionStrategy>(std::move(cache));
 }
 

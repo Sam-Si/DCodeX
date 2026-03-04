@@ -24,12 +24,14 @@
 #include "src/common/execution_cache.h"
 #include "src/engine/execution_pipeline.h"
 #include "src/engine/execution_types.h"
+#include "src/engine/language_toolchain.h"
 
 namespace dcodex {
 
 // -----------------------------------------------------------------------------
 // Strategy Pattern: Interface for different execution strategies (e.g., C, C++, Python).
 // Now accepts CacheInterface via constructor for dependency injection.
+// Uses LanguageToolchainFactory for decoupled language-specific configuration.
 // -----------------------------------------------------------------------------
 class ExecutionStrategy {
  public:
@@ -58,71 +60,63 @@ class ExecutionStrategy {
 
 // -----------------------------------------------------------------------------
 // CompiledLanguageStrategy: Base class for compiled languages (C, C++)
-// Supports both C and C++ compilation with appropriate compiler selection.
+// Uses LanguageToolchainFactory for compiler/flag configuration.
 // -----------------------------------------------------------------------------
 class CompiledLanguageStrategy : public ExecutionStrategy {
  public:
-  // Language type for compiled languages
-  enum class Language { kC, kCpp };
-
+  // Constructs with a toolchain factory for dependency injection.
   explicit CompiledLanguageStrategy(
-      Language language, std::shared_ptr<CacheInterface> cache = nullptr);
+      std::unique_ptr<LanguageToolchainFactory> toolchain,
+      std::shared_ptr<CacheInterface> cache = nullptr);
   ~CompiledLanguageStrategy() override = default;
+
+  // Disallow copy and move operations.
+  CompiledLanguageStrategy(const CompiledLanguageStrategy&) = delete;
+  CompiledLanguageStrategy& operator=(const CompiledLanguageStrategy&) = delete;
+  CompiledLanguageStrategy(CompiledLanguageStrategy&&) = delete;
+  CompiledLanguageStrategy& operator=(CompiledLanguageStrategy&&) = delete;
 
   [[nodiscard]] absl::StatusOr<ExecutionResult> Execute(
       absl::string_view code, absl::string_view stdin_data,
       OutputCallback callback) override;
 
-  [[nodiscard]] absl::string_view GetStrategyId() const override {
-    return language_ == Language::kC ? "c" : "cpp";
-  }
+  [[nodiscard]] absl::string_view GetStrategyId() const override;
 
  protected:
   [[nodiscard]] std::unique_ptr<ExecutionPipeline> CreatePipeline(
       std::shared_ptr<CacheInterface> cache = nullptr) override;
 
  private:
-  Language language_;
+  std::unique_ptr<LanguageToolchainFactory> toolchain_;
   std::shared_ptr<CacheInterface> cache_;
-
-  // Returns the file extension for this language.
-  [[nodiscard]] absl::string_view GetExtension() const {
-    return language_ == Language::kC ? ".c" : ".cpp";
-  }
-
-  // Returns the compiler name for this language.
-  [[nodiscard]] absl::string_view GetCompiler() const {
-    return language_ == Language::kC ? "clang" : "clang++";
-  }
-
-  // Returns the standard flags for this language.
-  [[nodiscard]] std::vector<std::string> GetStandardFlags() const {
-    if (language_ == Language::kC) {
-      return {"-std=c11", "-Wall"};
-    }
-    return {"-std=c++17"};
-  }
 };
 
 // C implementation of the ExecutionStrategy.
-// Uses clang for compilation.
+// Uses CToolchain for configuration.
 class CExecutionStrategy final : public CompiledLanguageStrategy {
  public:
-  explicit CExecutionStrategy(std::shared_ptr<CacheInterface> cache);
+  explicit CExecutionStrategy(std::shared_ptr<CacheInterface> cache = nullptr);
 };
 
 // C++ implementation of the ExecutionStrategy.
-// Uses clang++ for compilation.
+// Uses CppToolchain for configuration.
 class CppExecutionStrategy final : public CompiledLanguageStrategy {
  public:
-  explicit CppExecutionStrategy(std::shared_ptr<CacheInterface> cache);
+  explicit CppExecutionStrategy(std::shared_ptr<CacheInterface> cache = nullptr);
 };
 
 // Python implementation of the ExecutionStrategy.
+// Uses PythonToolchain for configuration.
 class PythonExecutionStrategy final : public ExecutionStrategy {
  public:
-  explicit PythonExecutionStrategy(std::shared_ptr<CacheInterface> cache);
+  explicit PythonExecutionStrategy(std::shared_ptr<CacheInterface> cache = nullptr);
   ~PythonExecutionStrategy() override = default;
+
+  // Disallow copy and move operations.
+  PythonExecutionStrategy(const PythonExecutionStrategy&) = delete;
+  PythonExecutionStrategy& operator=(const PythonExecutionStrategy&) = delete;
+  PythonExecutionStrategy(PythonExecutionStrategy&&) = delete;
+  PythonExecutionStrategy& operator=(PythonExecutionStrategy&&) = delete;
 
   [[nodiscard]] absl::StatusOr<ExecutionResult> Execute(
       absl::string_view code, absl::string_view stdin_data,
@@ -135,6 +129,7 @@ class PythonExecutionStrategy final : public ExecutionStrategy {
       std::shared_ptr<CacheInterface> cache) override;
 
  private:
+  std::unique_ptr<LanguageToolchainFactory> toolchain_;
   std::shared_ptr<CacheInterface> cache_;
 };
 
