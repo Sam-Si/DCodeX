@@ -23,6 +23,8 @@
 #include "absl/status/status.h"
 #include "absl/strings/substitute.h"
 #include "src/api/code_executor_service.h"
+#include "src/api/server_instance_manager.h"
+#include "src/common/execution_cache.h"
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 ABSL_FLAG(int, max_concurrent_sandboxes, 10,
@@ -31,17 +33,31 @@ ABSL_FLAG(int, max_concurrent_sandboxes, 10,
 namespace dcodex {
 
 absl::Status RunServer() {
-  EnsureSingleInstance();
+  // Acquire single-instance lock before starting server.
+  ServerInstanceManager& instance_manager = ServerInstanceManager::Instance();
+  absl::Status lock_status = instance_manager.AcquireLock();
+  if (!lock_status.ok()) {
+    LOG(ERROR) << "Failed to acquire single-instance lock: " << lock_status.message();
+    return lock_status;
+  }
+
   std::string server_address = absl::Substitute("0.0.0.0:$0", absl::GetFlag(FLAGS_port));
-  CodeExecutorServiceImpl service(absl::GetFlag(FLAGS_max_concurrent_sandboxes));
+  auto cache = std::make_shared<ExecutionCache>(absl::Hours(1), 1000);
+  CodeExecutorServiceImpl service(absl::GetFlag(FLAGS_max_concurrent_sandboxes), std::move(cache));
   
   grpc::ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
-  if (!server) return absl::InternalError("Failed to start gRPC server");
+  if (!server) {
+    instance_manager.ReleaseLock();
+    return absl::InternalError("Failed to start gRPC server");
+  }
   LOG(INFO) << "Server listening on " << server_address;
   server->Wait();
+  
+  // Release lock on shutdown (though this is typically not reached).
+  instance_manager.ReleaseLock();
   return absl::OkStatus();
 }
 
@@ -50,7 +66,8 @@ absl::Status RunServer() {
 int main(int argc, char** argv) {
   absl::InitializeLog();
   absl::ParseCommandLine(argc, argv);
-  if (absl::Status status = dcodex::RunServer(); !status.ok()) {
+  const absl::Status status = dcodex::RunServer();
+  if (!status.ok()) {
     LOG(ERROR) << "Server failed: " << status.message();
     return 1;
   }

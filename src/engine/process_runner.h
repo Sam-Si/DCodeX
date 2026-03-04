@@ -38,8 +38,10 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "src/engine/output_filter.h"
+#include "src/engine/sandbox.h"
 
 extern char **environ;
 
@@ -190,6 +192,80 @@ class PipePair {
 };
 
 // ==============================================================================
+// ScopedProcess: RAII Wrapper for Child Processes
+// ==============================================================================
+
+/// RAII wrapper for a child process.
+/// Ensures the child is killed and reaped on destruction to prevent zombies.
+class ScopedProcess {
+ public:
+  explicit ScopedProcess(pid_t pid = -1) noexcept : pid_(pid), reaped_(false) {}
+  
+  ~ScopedProcess() { KillAndReap(); }
+
+  // Non-copyable
+  ScopedProcess(const ScopedProcess&) = delete;
+  ScopedProcess& operator=(const ScopedProcess&) = delete;
+
+  // Movable
+  ScopedProcess(ScopedProcess&& other) noexcept 
+      : pid_(other.pid_), reaped_(other.reaped_) {
+    other.pid_ = -1;
+    other.reaped_ = true;
+  }
+
+  ScopedProcess& operator=(ScopedProcess&& other) noexcept {
+    if (this != &other) {
+      KillAndReap();
+      pid_ = other.pid_;
+      reaped_ = other.reaped_;
+      other.pid_ = -1;
+      other.reaped_ = true;
+    }
+    return *this;
+  }
+
+  /// Returns the PID of the child process.
+  [[nodiscard]] pid_t Get() const noexcept { return pid_; }
+
+  /// Checks if the process is valid.
+  [[nodiscard]] bool IsValid() const noexcept { return pid_ > 0; }
+
+  /// Releases ownership without killing/reaping.
+  [[nodiscard]] pid_t Release() noexcept {
+    const pid_t pid = pid_;
+    pid_ = -1;
+    reaped_ = true;
+    return pid;
+  }
+
+  /// Kills the process (if running) and waits for it to prevent zombies.
+  /// Returns the exit status, or -1 if the process was already reaped.
+  int KillAndReap() {
+    if (pid_ <= 0 || reaped_) {
+      return -1;
+    }
+
+    // Check if process is still running
+    if (kill(pid_, 0) == 0) {
+      // Process is still running, kill it
+      kill(pid_, SIGKILL);
+    }
+
+    // Wait for the process to prevent zombies
+    int status = 0;
+    waitpid(pid_, &status, 0);
+    reaped_ = true;
+    pid_ = -1;
+    return status;
+  }
+
+ private:
+  pid_t pid_;
+  bool reaped_;
+};
+
+// ==============================================================================
 // ProcessRunner: Process Execution Utilities using posix_spawn and epoll
 // ==============================================================================
 
@@ -257,7 +333,38 @@ class ProcessRunner {
           absl::StrFormat("posix_spawnp failed for '%s'", c_argv[0]));
     }
 
+    // If sandboxed, apply resource limits to the spawned process
+    // Note: This is a best-effort approach. For proper sandboxing,
+    // we'd need to use fork+exec or a more sophisticated mechanism.
+    if (sandboxed && pid > 0) {
+      ApplyResourceLimitsToProcess(pid);
+    }
+
     return pid;
+  }
+
+  /// Applies resource limits to a running process (best-effort).
+  static void ApplyResourceLimitsToProcess(pid_t pid) {
+    // Note: We cannot directly setrlimit for another process.
+    // For proper sandboxing, we'd need to use prctl or cgroups.
+    // This is a placeholder for future enhancement.
+    (void)pid;  // Suppress unused parameter warning
+  }
+
+  /// Applies resource limits (CPU time, memory) for sandboxed execution.
+  /// Call this in the child process after fork but before exec.
+  static void ApplyResourceLimits() {
+    const int cpu_limit_secs =
+        absl::GetFlag(FLAGS_sandbox_cpu_time_limit_seconds);
+    const struct rlimit cpu_limit{static_cast<rlim_t>(cpu_limit_secs),
+                                   static_cast<rlim_t>(cpu_limit_secs)};
+    setrlimit(RLIMIT_CPU, &cpu_limit);
+
+    const uint64_t mem_limit_bytes =
+        absl::GetFlag(FLAGS_sandbox_memory_limit_bytes);
+    const struct rlimit mem_limit{static_cast<rlim_t>(mem_limit_bytes),
+                                   static_cast<rlim_t>(mem_limit_bytes)};
+    setrlimit(RLIMIT_AS, &mem_limit);
   }
 
   /// Reads output from stdout and stderr pipes using efficient I/O multiplexing.
@@ -397,9 +504,8 @@ class ProcessRunner {
       if (is_stdout) {
         callback(chunk, "");
       } else {
-        std::string processed = GetOutputFilter().Process(chunk);
-        if (!processed.empty()) {
-          callback("", processed);
+        if (!GetOutputFilter().ShouldSuppress(chunk)) {
+          callback("", chunk);
         }
       }
     }

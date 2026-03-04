@@ -78,7 +78,7 @@ class ExecuteReactor final : public grpc::ServerWriteReactor<ExecutionLog>,
                             public WorkerTask {
  public:
   ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter,
-                 WarmWorkerPool* pool);
+                 WarmWorkerPool* pool, std::shared_ptr<SandboxedProcess> executor);
 
   void StartExecution() override;
   void PumpWrites() override;
@@ -90,6 +90,7 @@ class ExecuteReactor final : public grpc::ServerWriteReactor<ExecutionLog>,
  private:
   std::shared_ptr<ReactorInternalState> shared_state_;
   WarmWorkerPool* pool_;
+  std::shared_ptr<SandboxedProcess> executor_;
 };
 
 }  // namespace dcodex

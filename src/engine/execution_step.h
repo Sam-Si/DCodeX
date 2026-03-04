@@ -24,7 +24,6 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "src/engine/execution_types.h"
-#include "src/engine/sandbox_executor.h"
 
 namespace dcodex {
 
@@ -32,19 +31,45 @@ namespace dcodex {
 class ExecutionContext;
 
 // -----------------------------------------------------------------------------
-// Command Pattern (GoF): ExecutionStep Interface
-// Each step represents a single responsibility in the execution pipeline.
+// Chain of Responsibility Pattern (GoF): ExecutionStep Interface
+// Each step represents a handler in the execution chain.
 // -----------------------------------------------------------------------------
 class ExecutionStep {
  public:
   virtual ~ExecutionStep() = default;
 
-  // Executes this step and returns OK on success, or an error status on failure.
-  // The context is passed by reference to allow steps to share state.
-  virtual absl::Status Execute(ExecutionContext& context) = 0;
+  // Sets the next step in the chain.
+  // Returns the next step pointer to allow chaining.
+  ExecutionStep* SetNext(std::unique_ptr<ExecutionStep> next) {
+    next_ = std::move(next);
+    return next_.get();
+  }
+
+  // Executes this step and delegates to the next step if successful.
+  // Returns OK on success, or an error status on failure.
+  absl::Status Execute(ExecutionContext& context) {
+    // Execute current step logic
+    absl::Status status = ExecuteStep(context);
+    if (!status.ok()) {
+      return status;
+    }
+
+    // Delegate to next step if exists
+    if (next_) {
+      return next_->Execute(context);
+    }
+
+    return absl::OkStatus();
+  }
+
+  // Pure virtual method for the specific step logic.
+  virtual absl::Status ExecuteStep(ExecutionContext& context) = 0;
 
   // Returns a descriptive name for this step (used in tracing/logging).
   [[nodiscard]] virtual absl::string_view Name() const = 0;
+
+ private:
+  std::unique_ptr<ExecutionStep> next_;
 };
 
 // -----------------------------------------------------------------------------
@@ -69,15 +94,12 @@ class ExecutionContext {
 
   // Configuration
   bool sandboxed = true;
-  SandboxExecutor executor;
 
   ExecutionContext(absl::string_view code, absl::string_view stdin_data,
-                   OutputCallback callback, 
-                   ResourcePolicy policy = ResourcePolicy::FromFlags())
+                   OutputCallback callback)
       : code(code),
         stdin_data(stdin_data),
-        callback(std::move(callback)),
-        executor(std::move(policy)) {
+        callback(std::move(callback)) {
     trace << "--- Backend Execution Trace ---\n";
   }
 
@@ -110,7 +132,7 @@ class CreateSourceFileStep : public ExecutionStep {
   explicit CreateSourceFileStep(absl::string_view extension)
       : extension_(extension) {}
 
-  absl::Status Execute(ExecutionContext& context) override;
+  absl::Status ExecuteStep(ExecutionContext& context) override;
   [[nodiscard]] absl::string_view Name() const override { return "CreateSourceFile"; }
 
  private:
@@ -126,7 +148,7 @@ class CompileStep : public ExecutionStep {
       : compiler_(compiler),
         compiler_flags_(std::move(compiler_flags)) {}
 
-  absl::Status Execute(ExecutionContext& context) override;
+  absl::Status ExecuteStep(ExecutionContext& context) override;
   [[nodiscard]] absl::string_view Name() const override { return "Compile"; }
 
  private:
@@ -140,7 +162,7 @@ class RunProcessStep : public ExecutionStep {
  public:
   explicit RunProcessStep(bool sandboxed) : sandboxed_(sandboxed) {}
 
-  absl::Status Execute(ExecutionContext& context) override;
+  absl::Status ExecuteStep(ExecutionContext& context) override;
   [[nodiscard]] absl::string_view Name() const override { return "RunProcess"; }
 
  private:
@@ -154,7 +176,7 @@ class FinalizeResultStep : public ExecutionStep {
   explicit FinalizeResultStep(absl::string_view context_name)
       : context_name_(context_name) {}
 
-  absl::Status Execute(ExecutionContext& context) override;
+  absl::Status ExecuteStep(ExecutionContext& context) override;
   [[nodiscard]] absl::string_view Name() const override { return "FinalizeResult"; }
 
  private:

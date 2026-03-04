@@ -11,85 +11,29 @@ cc_library(
 )
 
 cc_library(
-    name = "resource_policy",
-    hdrs = ["resource_policy.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/time",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "sandbox_interface",
-    hdrs = ["sandbox.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        ":execution_types",
-        "//src/common:execution_cache",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "language_registry",
-    hdrs = ["language_registry.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        ":execution_strategy",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "sandbox_executor",
-    srcs = ["sandbox_executor.cpp"],
-    hdrs = ["sandbox_executor.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        ":execution_types",
-        ":resource_policy",
-        ":process_timeout_manager",
-        ":process_runner_lib",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/time",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "process_runner_lib",
-    hdrs = ["process_runner.h", "output_filter.h"],
-    copts = ["-std=c++23"],
-    deps = [
-        ":execution_types",
-        ":sandbox_interface",
-        "//src/common:execution_cache",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/types:span",
-    ],
-)
-
-cc_library(
     name = "execution_step",
     hdrs = ["execution_step.h"],
     copts = ["-std=c++23"],
     deps = [
         ":execution_types",
-        ":sandbox_executor",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "execution_step_decorator",
+    srcs = ["execution_step_decorator.cpp"],
+    hdrs = ["execution_step_decorator.h"],
+    copts = ["-std=c++23"],
+    deps = [
+        ":execution_step",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
     ],
     visibility = ["//visibility:public"],
 )
@@ -108,12 +52,39 @@ cc_library(
 )
 
 cc_library(
+    name = "execution_pipeline_builder",
+    srcs = ["execution_pipeline_builder.cpp"],
+    hdrs = ["execution_pipeline_builder.h"],
+    copts = ["-std=c++23"],
+    deps = [
+        ":execution_pipeline",
+        ":execution_step",
+        "//src/common:execution_cache",
+        "@com_google_absl//absl/strings",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "language_toolchain",
+    srcs = ["language_toolchain.cpp"],
+    hdrs = ["language_toolchain.h"],
+    copts = ["-std=c++23"],
+    deps = [
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "execution_strategy",
     hdrs = ["execution_strategy.h"],
     copts = ["-std=c++23"],
     deps = [
         ":execution_pipeline",
         ":execution_types",
+        ":language_toolchain",
         "//src/common:execution_cache",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -123,7 +94,6 @@ cc_library(
 
 cc_library(
     name = "process_timeout_manager",
-    srcs = ["process_timeout_manager.cpp"],
     hdrs = ["process_timeout_manager.h"],
     copts = ["-std=c++23"],
     deps = [
@@ -140,15 +110,14 @@ cc_library(
     copts = ["-std=c++23"],
     deps = [
         ":execution_pipeline",
+        ":execution_pipeline_builder",
         ":execution_step",
         ":execution_strategy",
         ":execution_types",
-        ":language_registry",
+        ":language_toolchain",
         ":process_timeout_manager",
-        ":resource_policy",
-        ":sandbox_executor",
-        ":sandbox_interface",
         "//src/common:execution_cache",
+        "//src/common:status_macros",
         "//proto:sandbox_cc_grpc",
         "@com_github_grpc_grpc//:grpc++_unsecure",
         "@com_google_absl//absl/cleanup",

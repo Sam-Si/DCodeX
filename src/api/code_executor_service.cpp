@@ -13,10 +13,6 @@
 // limitations under the License.
 
 #include "src/api/code_executor_service.h"
-#include <signal.h>
-#include <unistd.h>
-#include <fstream>
-#include <thread>
 
 #include "absl/flags/flag.h"
 #include "absl/log/log.h"
@@ -47,9 +43,11 @@ void RejectReactor::OnDone() {
   }
 }
 
-CodeExecutorServiceImpl::CodeExecutorServiceImpl(int max_sandboxes)
+CodeExecutorServiceImpl::CodeExecutorServiceImpl(int max_sandboxes,
+                                                 std::shared_ptr<CacheInterface> cache)
     : active_sandboxes_(0),
-      worker_pool_(max_sandboxes) {
+      worker_pool_(max_sandboxes),
+      executor_(std::make_shared<SandboxedProcess>(std::move(cache))) {
   worker_pool_.Start();
 }
 
@@ -80,7 +78,7 @@ grpc::ServerWriteReactor<ExecutionLog>* CodeExecutorServiceImpl::Execute(
     return reactor.get();
   }
   auto reactor = std::make_shared<ExecuteReactor>(request, active_sandboxes_,
-                                                   &worker_pool_);
+                                                   &worker_pool_, executor_);
   absl::Status assignment = worker_pool_.AcquireWorker(reactor);
   if (!assignment.ok()) {
     LOG(WARNING) << "Worker pool rejected request: " << assignment;
@@ -90,38 +88,6 @@ grpc::ServerWriteReactor<ExecutionLog>* CodeExecutorServiceImpl::Execute(
     return reject_reactor.get();
   }
   return reactor.get();
-}
-
-void EnsureSingleInstance() {
-  const std::string pid_file = "/tmp/dcodex_server.pid";
-  std::ifstream existing_pid_file(pid_file);
-  if (existing_pid_file.is_open()) {
-    pid_t old_pid;
-    if (existing_pid_file >> old_pid) {
-      if (kill(old_pid, 0) == 0) {
-        LOG(INFO) << "Existing server found with PID " << old_pid << ". Killing it...";
-        kill(old_pid, SIGTERM);
-        // Wait a bit for it to terminate
-        for (int i = 0; i < 10; ++i) {
-          if (kill(old_pid, 0) != 0) break;
-          std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (kill(old_pid, 0) == 0) {
-          LOG(WARNING) << "Server did not terminate with SIGTERM, using SIGKILL...";
-          kill(old_pid, SIGKILL);
-        }
-      }
-    }
-    existing_pid_file.close();
-  }
-
-  std::ofstream new_pid_file(pid_file, std::ios::trunc);
-  if (new_pid_file.is_open()) {
-    new_pid_file << getpid();
-    new_pid_file.close();
-  } else {
-    LOG(ERROR) << "Failed to create PID file: " << pid_file;
-  }
 }
 
 }  // namespace dcodex
