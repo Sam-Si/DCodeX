@@ -8,4 +8,16 @@ bazel_dep(name = "googletest", version = "1.17.0")
 bazel_dep(name = "protobuf", version = "29.5", repo_name = "com_google_protobuf")
 bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "rules_python", version = "1.1.0")
 bazel_dep(name = "abseil-cpp", version = "20250127.1", repo_name = "com_google_absl")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.12")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "pip",
+    python_version = "3.12",
+    requirements_lock = "//python_client:requirements.txt",
+)
+use_repo(pip, "pip")

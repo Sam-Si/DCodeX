@@ -1,6 +1,7 @@
 load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_grpc_library", "py_proto_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -19,4 +20,15 @@ cc_grpc_library(
     srcs = [":sandbox_proto"],
     grpc_only = True,
     deps = [":sandbox_cc_proto"],
+)
+
+py_proto_library(
+    name = "sandbox_py_proto",
+    deps = [":sandbox_proto"],
+)
+
+py_grpc_library(
+    name = "sandbox_py_grpc",
+    srcs = [":sandbox_proto"],
+    deps = [":sandbox_py_proto"],
 )
