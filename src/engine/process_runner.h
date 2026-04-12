@@ -18,13 +18,16 @@
 #include <array>
 #include <vector>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#include <string.h>
 #ifdef __linux__
 #include <sys/epoll.h>
+#include <sys/syscall.h>
 #elif defined(__APPLE__)
 #include <sys/event.h>
 #include <sys/time.h>
@@ -182,7 +185,7 @@ class PipePair {
 
   /// Releases ownership of the write end without closing.
   [[nodiscard]] int ReleaseWrite() noexcept { return write_end_.Release(); }
-  
+
   /// Releases ownership of the read end without closing.
   [[nodiscard]] int ReleaseRead() noexcept { return read_end_.Release(); }
 
@@ -200,7 +203,7 @@ class PipePair {
 class ScopedProcess {
  public:
   explicit ScopedProcess(pid_t pid = -1) noexcept : pid_(pid), reaped_(false) {}
-  
+
   ~ScopedProcess() { KillAndReap(); }
 
   // Non-copyable
@@ -208,7 +211,7 @@ class ScopedProcess {
   ScopedProcess& operator=(const ScopedProcess&) = delete;
 
   // Movable
-  ScopedProcess(ScopedProcess&& other) noexcept 
+  ScopedProcess(ScopedProcess&& other) noexcept
       : pid_(other.pid_), reaped_(other.reaped_) {
     other.pid_ = -1;
     other.reaped_ = true;
@@ -248,7 +251,6 @@ class ScopedProcess {
 
     // Check if process is still running
     if (kill(pid_, 0) == 0) {
-      // Process is still running, kill it
       kill(pid_, SIGKILL);
     }
 
@@ -266,93 +268,52 @@ class ScopedProcess {
 };
 
 // ==============================================================================
-// ProcessRunner: Process Execution Utilities using posix_spawn and epoll
+// ProcessRunner: Process Execution Utilities
+// ==============================================================================
+//
+// Sandboxing strategy — why two spawn paths:
+//
+//   sandboxed=false  (CompileStep):  posix_spawnp()
+//     Fast path for compilation. No resource limits needed; we just want the
+//     compiler to run without restrictions and without the fork overhead.
+//
+//   sandboxed=true   (RunProcessStep):  fork() + exec()
+//     The ONLY portable way to set rlimits on a child before exec is to call
+//     setrlimit() inside the child after fork() but before exec(). Alternatives:
+//
+//       • posix_spawnattr_setrlimit() — Linux-only (glibc ≥ 2.34, kernel ≥ 5.12),
+//         absent on macOS. Not portable.
+//       • pthread_atfork() — fires for ALL forks in all threads, not targeted.
+//       • setrlimit from parent — impossible: rlimits live in the target process's
+//         task_struct; there is no syscall to set them for another PID.
+//       • cgroups v2 — powerful but requires root or cgroup delegation; overkill.
+//
+//     So: fork+exec with ApplyResourceLimits() in the child is the correct,
+//     portable, and minimal approach.
+//
 // ==============================================================================
 
 /// Utility class for process execution with sandboxing support.
-/// Uses posix_spawn for efficient process creation and epoll for I/O multiplexing.
 class ProcessRunner {
  public:
   /// Spawns a new process with the given arguments.
-  /// Uses posix_spawn for efficient process creation.
+  ///
+  /// sandboxed=false → posix_spawnp (fast, no rlimits)
+  /// sandboxed=true  → fork+exec with setrlimit in child (real enforcement)
+  ///
   /// Returns the PID on success, or an error status on failure.
   static absl::StatusOr<pid_t> SpawnProcess(
       absl::Span<const std::string> argv,
       int stdin_fd, int stdout_fd, int stderr_fd,
       bool sandboxed) {
-    // Build C-style argv array
-    std::vector<char*> c_argv;
-    for (const auto& arg : argv) {
-      c_argv.push_back(const_cast<char*>(arg.c_str()));
+    if (sandboxed) {
+      return ForkAndExecSandboxed(argv, stdin_fd, stdout_fd, stderr_fd);
     }
-    c_argv.push_back(nullptr);
-
-    // Initialize spawn attributes
-    posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-
-    // Set flags for process control
-    short flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
-    posix_spawnattr_setflags(&attr, flags);
-
-    // Reset signal mask for the child process
-    sigset_t empty_mask;
-    sigemptyset(&empty_mask);
-    posix_spawnattr_setsigmask(&attr, &empty_mask);
-
-    // Initialize file actions
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-
-    // Redirect stdin, stdout, stderr
-    posix_spawn_file_actions_adddup2(&actions, stdin_fd, STDIN_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, stdout_fd, STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, stderr_fd, STDERR_FILENO);
-
-    // Close the original fds in the child (they're dup'd)
-    posix_spawn_file_actions_addclose(&actions, stdin_fd);
-    posix_spawn_file_actions_addclose(&actions, stdout_fd);
-    posix_spawn_file_actions_addclose(&actions, stderr_fd);
-
-    // Apply resource limits in the parent before spawn if sandboxed
-    // Note: posix_spawn doesn't directly support rlimit, so we'll need
-    // to use a different approach - setrlimit in the child via a helper
-    // For now, we'll skip sandbox limits in posix_spawn path
-    // This is a known limitation - fork+exec is needed for full sandboxing
-
-    pid_t pid = 0;
-    int result = posix_spawnp(&pid, c_argv[0], &actions, &attr,
-                              c_argv.data(), environ);
-
-    // Cleanup
-    posix_spawn_file_actions_destroy(&actions);
-    posix_spawnattr_destroy(&attr);
-
-    if (result != 0) {
-      return absl::ErrnoToStatus(result, 
-          absl::StrFormat("posix_spawnp failed for '%s'", c_argv[0]));
-    }
-
-    // If sandboxed, apply resource limits to the spawned process
-    // Note: This is a best-effort approach. For proper sandboxing,
-    // we'd need to use fork+exec or a more sophisticated mechanism.
-    if (sandboxed && pid > 0) {
-      ApplyResourceLimitsToProcess(pid);
-    }
-
-    return pid;
+    return PosixSpawnUnsandboxed(argv, stdin_fd, stdout_fd, stderr_fd);
   }
 
-  /// Applies resource limits to a running process (best-effort).
-  static void ApplyResourceLimitsToProcess(pid_t pid) {
-    // Note: We cannot directly setrlimit for another process.
-    // For proper sandboxing, we'd need to use prctl or cgroups.
-    // This is a placeholder for future enhancement.
-    (void)pid;  // Suppress unused parameter warning
-  }
-
-  /// Applies resource limits (CPU time, memory) for sandboxed execution.
-  /// Call this in the child process after fork but before exec.
+  /// Applies resource limits (CPU time, address space) for sandboxed execution.
+  /// Must be called inside the child process after fork() but before exec().
   static void ApplyResourceLimits() {
     const int cpu_limit_secs =
         absl::GetFlag(FLAGS_sandbox_cpu_time_limit_seconds);
@@ -367,22 +328,215 @@ class ProcessRunner {
     setrlimit(RLIMIT_AS, &mem_limit);
   }
 
-  /// Reads output from stdout and stderr pipes using efficient I/O multiplexing.
+  /// Reads output from stdout and stderr pipes using the best available method.
   /// Returns true if output was truncated.
-  static bool ReadOutputMultiplexed(int stdout_fd, int stderr_fd, pid_t child_pid,
-                                    const OutputCallback& callback, bool& truncated) {
-    // Create multiplex instance
+  static bool ReadOutput(int stdout_fd, int stderr_fd, pid_t child_pid,
+                         const OutputCallback& callback, bool& truncated) {
+    return ReadOutputMultiplexed(stdout_fd, stderr_fd, child_pid, callback,
+                                 truncated);
+  }
+
+ private:
+  // ---------------------------------------------------------------------------
+  // ForkAndExecSandboxed
+  //
+  // Performs a fork+exec with full child-side setup:
+  //   1. setrlimit (CPU + AS) — real enforcement, not best-effort
+  //   2. signal mask + disposition reset — don't inherit gRPC handlers
+  //   3. dup2 → stdio redirect
+  //   4. close all FDs ≥ 3 — don't leak epoll/kqueue/gRPC FDs into child
+  //   5. execvp
+  //   6. _exit(127) on exec failure — NEVER exit(), avoids flushing parent
+  //      stdio buffers and running C++ / atexit destructors
+  // ---------------------------------------------------------------------------
+  static absl::StatusOr<pid_t> ForkAndExecSandboxed(
+      absl::Span<const std::string> argv,
+      int stdin_fd, int stdout_fd, int stderr_fd) {
+    // Build C-style argv. Strings are caller-owned and persist past exec.
+    std::vector<char*> c_argv;
+    c_argv.reserve(argv.size() + 1);
+    for (const auto& arg : argv) {
+      c_argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    c_argv.push_back(nullptr);
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+      return absl::ErrnoToStatus(errno, "fork() failed");
+    }
+
+    if (pid == 0) {
+      // -----------------------------------------------------------------------
+      // CHILD PROCESS — only async-signal-safe operations allowed here.
+      // -----------------------------------------------------------------------
+
+      // Step 1: Apply resource limits BEFORE exec so they are enforced.
+      //   RLIMIT_CPU  → kernel sends SIGXCPU (then SIGKILL) on CPU exhaustion.
+      //   RLIMIT_AS   → malloc/mmap returns ENOMEM when address space is full.
+      ApplyResourceLimits();
+
+      // Step 2: Reset signal mask — gRPC blocks several signals; clear them.
+      sigset_t empty_mask;
+      sigemptyset(&empty_mask);
+      sigprocmask(SIG_SETMASK, &empty_mask, nullptr);
+
+      // Step 3: Reset all signal dispositions to SIG_DFL.
+      //   Inherited handlers (e.g. absl/gRPC SIGSEGV, SIGTERM handlers) must
+      //   not run in the child. We iterate instead of using POSIX_SPAWN_SETSIGDEF
+      //   because we need this to work with fork+exec.
+      struct sigaction sa{};
+      sa.sa_handler = SIG_DFL;
+      sigemptyset(&sa.sa_mask);
+      sa.sa_flags = 0;
+      for (int sig = 1; sig < NSIG; ++sig) {
+        if (sig == SIGKILL || sig == SIGSTOP) continue;  // uncatchable
+        sigaction(sig, &sa, nullptr);
+      }
+
+      // Step 4: Redirect stdio.
+      if (dup2(stdin_fd,  STDIN_FILENO)  == -1) _exit(127);
+      if (dup2(stdout_fd, STDOUT_FILENO) == -1) _exit(127);
+      if (dup2(stderr_fd, STDERR_FILENO) == -1) _exit(127);
+
+      // Step 5: Close all file descriptors above 2.
+      //   This prevents the child from inheriting the parent's pipe read/write
+      //   ends, epoll fd, kqueue fd, gRPC channel sockets, etc.
+      CloseExtraFds(3);
+
+      // Step 6: Execute. On success this never returns.
+      execvp(c_argv[0], c_argv.data());
+
+      // Step 7: exec failed — use _exit, not exit.
+      //   exit() would: flush parent's stdio buffers, run C++ destructors for
+      //   globals, call atexit() handlers, close FILE* streams. All wrong.
+      //   _exit(127) matches the POSIX convention for "command not found".
+      _exit(127);
+    }
+
+    // Parent: return the child PID. Caller wraps it in ScopedProcess.
+    return pid;
+  }
+
+  // ---------------------------------------------------------------------------
+  // PosixSpawnUnsandboxed
+  //
+  // Fast path for the CompileStep. No rlimits, no fork overhead.
+  // posix_spawnp does an internal fork+exec but is optimized (vfork on some
+  // platforms, or clone() on Linux) and avoids COW page-table duplication.
+  // ---------------------------------------------------------------------------
+  static absl::StatusOr<pid_t> PosixSpawnUnsandboxed(
+      absl::Span<const std::string> argv,
+      int stdin_fd, int stdout_fd, int stderr_fd) {
+    std::vector<char*> c_argv;
+    c_argv.reserve(argv.size() + 1);
+    for (const auto& arg : argv) {
+      c_argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    c_argv.push_back(nullptr);
+
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+
+    // Reset signal mask and dispositions for the child.
+    const short flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
+    posix_spawnattr_setflags(&attr, flags);
+
+    sigset_t empty_mask;
+    sigemptyset(&empty_mask);
+    posix_spawnattr_setsigmask(&attr, &empty_mask);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+
+    posix_spawn_file_actions_adddup2(&actions, stdin_fd,  STDIN_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, stdout_fd, STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, stderr_fd, STDERR_FILENO);
+    // Close the originals in the child after dup2 (they're now at 0/1/2).
+    posix_spawn_file_actions_addclose(&actions, stdin_fd);
+    posix_spawn_file_actions_addclose(&actions, stdout_fd);
+    posix_spawn_file_actions_addclose(&actions, stderr_fd);
+
+    pid_t pid = 0;
+    const int result = posix_spawnp(&pid, c_argv[0], &actions, &attr,
+                                    c_argv.data(), environ);
+
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
+
+    if (result != 0) {
+      return absl::ErrnoToStatus(
+          result,
+          absl::StrFormat("posix_spawnp failed for '%s'", c_argv[0]));
+    }
+    return pid;
+  }
+
+  // ---------------------------------------------------------------------------
+  // CloseExtraFds
+  //
+  // Called in the child after fork, closes all FDs >= lowfd.
+  // Tries the fastest available method, falls back progressively:
+  //
+  //   Linux ≥ 5.9:  close_range() syscall           — O(1), one syscall
+  //   Linux fallback: /proc/self/fd enumeration      — O(open_fds)
+  //   Portable fallback: iterate to sysconf OPEN_MAX — O(OPEN_MAX), ~1-4K
+  // ---------------------------------------------------------------------------
+  static void CloseExtraFds(int lowfd) noexcept {
+#if defined(__linux__)
+    // close_range(2) was added in Linux 5.9 (syscall 436 on x86-64).
+    // We call via syscall() to avoid a hard glibc >= 2.34 dependency.
+#  ifndef SYS_close_range
+#    define SYS_close_range 436
+#  endif
+    if (syscall(SYS_close_range, static_cast<unsigned>(lowfd),
+                ~0U, 0U) == 0) {
+      return;  // Done in one syscall.
+    }
+
+    // Fallback: enumerate /proc/self/fd (Linux ≥ 2.6.22).
+    // This avoids iterating thousands of potentially-unused FD slots.
+    DIR* dir = opendir("/proc/self/fd");
+    if (dir != nullptr) {
+      const int dirfd_val = dirfd(dir);
+      struct dirent* ent;
+      while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_name[0] == '.') continue;
+        const int fd = static_cast<int>(strtol(ent->d_name, nullptr, 10));
+        if (fd >= lowfd && fd != dirfd_val) {
+          close(fd);
+        }
+      }
+      closedir(dir);
+      return;
+    }
+#endif  // __linux__
+
+    // Portable fallback: iterate up to sysconf(_SC_OPEN_MAX).
+    // EBADF is silently ignored for already-closed slots.
+    long maxfd = sysconf(_SC_OPEN_MAX);
+    if (maxfd <= 0) maxfd = 1024;
+    for (int fd = lowfd; fd < static_cast<int>(maxfd); ++fd) {
+      close(fd);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // ReadOutputMultiplexed (unchanged — epoll on Linux, kqueue on macOS)
+  // ---------------------------------------------------------------------------
+
+  static bool ReadOutputMultiplexed(int stdout_fd, int stderr_fd,
+                                    pid_t child_pid,
+                                    const OutputCallback& callback,
+                                    bool& truncated) {
     MultiplexInstance multiplex;
     if (!multiplex.IsValid()) {
       truncated = false;
       return false;
     }
 
-    // Set fds to non-blocking mode
     SetNonBlocking(stdout_fd);
     SetNonBlocking(stderr_fd);
 
-    // Add fds to multiplexer
     if (!multiplex.AddFd(stdout_fd).ok()) {
       truncated = false;
       return false;
@@ -402,11 +556,10 @@ class ProcessRunner {
     struct epoll_event events[kMaxEvents];
 #elif defined(__APPLE__)
     struct kevent events[kMaxEvents];
-    struct timespec timeout = {0, 10000000}; // 10ms
+    struct timespec timeout = {0, 10000000};  // 10 ms
 #endif
 
     while (stdout_open || stderr_open) {
-      // Wait for events with a timeout
       int nfds = 0;
 #ifdef __linux__
       nfds = epoll_wait(multiplex.Get(), events, kMaxEvents, 10);
@@ -419,13 +572,10 @@ class ProcessRunner {
       }
 
       if (nfds == 0) {
-        // Timeout - check if process is still running
         int status;
         pid_t result = waitpid(child_pid, &status, WNOHANG);
         if (result == child_pid) {
-          // Process has exited
-          // Drain remaining data
-          DrainFd(stdout_fd, callback, true, stdout_open, total_bytes);
+          DrainFd(stdout_fd, callback, true,  stdout_open, total_bytes);
           DrainFd(stderr_fd, callback, false, stderr_open, total_bytes);
           break;
         }
@@ -440,13 +590,12 @@ class ProcessRunner {
         fd = static_cast<int>(reinterpret_cast<intptr_t>(events[i].udata));
 #endif
         if (fd == stdout_fd && stdout_open) {
-          ReadFromFd(fd, callback, true, stdout_open, total_bytes);
+          ReadFromFd(fd, callback, true,  stdout_open, total_bytes);
         } else if (fd == stderr_fd && stderr_open) {
           ReadFromFd(fd, callback, false, stderr_open, total_bytes);
         }
       }
 
-      // Check output limit
       const uint64_t max_output_bytes =
           absl::GetFlag(FLAGS_sandbox_max_output_bytes);
       if (total_bytes >= max_output_bytes) {
@@ -462,45 +611,31 @@ class ProcessRunner {
     return truncated;
   }
 
-  /// Reads output from stdout and stderr pipes using the best available method.
-  /// Returns true if output was truncated.
-  static bool ReadOutput(int stdout_fd, int stderr_fd, pid_t child_pid,
-                         const OutputCallback& callback, bool& truncated) {
-    return ReadOutputMultiplexed(stdout_fd, stderr_fd, child_pid, callback, truncated);
-  }
-
- private:
-  /// Sets a file descriptor to non-blocking mode.
   static void SetNonBlocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
+    const int flags = fcntl(fd, F_GETFL, 0);
     if (flags != -1) {
       fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
   }
 
-  /// Reads all available data from a file descriptor.
   static void ReadFromFd(int fd, const OutputCallback& callback,
-                         bool is_stdout, bool& open_flag, size_t& total_bytes) {
+                         bool is_stdout, bool& open_flag,
+                         size_t& total_bytes) {
     std::array<char, 4096> buffer{};
     while (true) {
-      ssize_t n = read(fd, buffer.data(), buffer.size());
+      const ssize_t n = read(fd, buffer.data(), buffer.size());
       if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          // No more data available right now
-          break;
-        }
-        // Error
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
         open_flag = false;
         break;
       }
       if (n == 0) {
-        // EOF
         open_flag = false;
         break;
       }
 
-      total_bytes += n;
-      absl::string_view chunk(buffer.data(), static_cast<size_t>(n));
+      total_bytes += static_cast<size_t>(n);
+      const absl::string_view chunk(buffer.data(), static_cast<size_t>(n));
       if (is_stdout) {
         callback(chunk, "");
       } else {
@@ -511,9 +646,8 @@ class ProcessRunner {
     }
   }
 
-  /// Drains remaining data from a file descriptor.
-  static void DrainFd(int fd, const OutputCallback& callback,
-                      bool is_stdout, bool& open_flag, size_t& total_bytes) {
+  static void DrainFd(int fd, const OutputCallback& callback, bool is_stdout,
+                      bool& open_flag, size_t& total_bytes) {
     if (!open_flag) return;
     SetNonBlocking(fd);
     ReadFromFd(fd, callback, is_stdout, open_flag, total_bytes);

@@ -82,7 +82,9 @@ ResourceStats ComputeResourceStats(const struct rusage& usage,
 // -----------------------------------------------------------------------------
 // SRP: Process Execution Helper
 // Handles low-level process execution with sandboxing support.
-// Now uses gRPC Alarm for timeout instead of fork-based watcher.
+// Sandboxed path: fork+exec with setrlimit() in child (real enforcement).
+// Non-sandboxed path: posix_spawnp for fast compilation without limits.
+// Wall-clock timeout enforced via gRPC Alarm.
 // -----------------------------------------------------------------------------
 
 // Formats the command trace with appropriate coloring.
@@ -159,7 +161,9 @@ absl::StatusOr<ExecutionResult> RunCommandWithSandbox(
 
   const absl::Time start = absl::Now();
   
-  // Use posix_spawn for efficient process creation
+  // Spawn the child process.
+  //   sandboxed=false → posix_spawnp (fast, no rlimits — used for compilation)
+  //   sandboxed=true  → fork+exec with setrlimit in child (real enforcement)
   ABSL_ASSIGN_OR_RETURN(const pid_t raw_pid, ProcessRunner::SpawnProcess(
       absl::MakeSpan(argv),
       stdin_p.ReadFd(),

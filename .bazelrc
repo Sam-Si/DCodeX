@@ -92,3 +92,60 @@ build:macos --disk_cache=~/Library/Caches/bazel-disk-cache
 build:macos --copt=-faligned-allocation
 build:macos --copt=-mmacosx-version-min=11.0
 build:macos --linkopt=-mmacosx-version-min=11.0
+
+# ============================================================
+# 7. LINUX CI CONFIG (--config=linux)
+# Optimised for typical 8-core Linux CI runners (GitHub Actions,
+# GCE, etc.). Focuses on: persistent disk cache, avoiding Bazel's
+# own sandbox overhead (tests run in their own ns already), fast
+# linking with lld, and saturating all available cores.
+# ============================================================
+
+# Persistent disk cache: survives across CI runs if the cache dir
+# is mounted / preserved between jobs (e.g. actions/cache).
+build:linux --disk_cache=/tmp/dcodex-bazel-cache
+
+# Skip Bazel's internal sandboxing for local actions — the OS-level
+# sandbox (seccomp/namespaces) is the real isolation boundary on Linux.
+build:linux --spawn_strategy=local
+build:linux --strategy=CppCompile=local
+build:linux --strategy=CppLink=local
+build:linux --genrule_strategy=local
+
+# Saturate cores: HOST_CPUS * 1.5 keeps the link step from stalling I/O.
+build:linux --jobs=12
+build:linux --local_resources=cpu=8
+build:linux --local_resources=memory=16384
+
+# lld is significantly faster than GNU ld for large C++ link steps.
+# On Ubuntu / Debian: apt install lld
+build:linux --linkopt=-fuse-ld=lld
+
+# Use clang for faster TU compilation (optional; comment out if gcc preferred).
+build:linux --repo_env=CC=clang
+build:linux --repo_env=CXX=clang++
+
+# No dsym / runfile symlinks on Linux.
+build:linux --nobuild_runfile_links
+build:linux --nolegacy_external_runfiles
+
+# Upload local results to remote cache if one is configured.
+# Set BAZEL_REMOTE_CACHE env var to enable, e.g.:
+#   export BAZEL_REMOTE_CACHE=grpc://cache.example.com:9092
+# build:linux --remote_cache=${BAZEL_REMOTE_CACHE}
+# build:linux --remote_cache_compression=true
+# build:linux --remote_upload_local_results=true
+
+# ============================================================
+# 8. DEV FAST ITERATION (--config=dev)
+# Disables optimisations entirely; maximises rebuild speed during
+# local development. Use for edit-compile-test loops.
+# ============================================================
+build:dev --compilation_mode=fastbuild
+build:dev --copt=-O0
+build:dev --copt=-g0
+build:dev --strip=always
+build:dev --spawn_strategy=local
+build:dev --strategy=CppCompile=local
+build:dev --nobuild_runfile_links
+build:dev --nolegacy_external_runfiles
