@@ -66,7 +66,9 @@ SERVER_OUTPUT_LIMIT="${SERVER_OUTPUT_LIMIT:-1024}" # 1 KB
 # Compute job count: nproc * 1.5, round up, never less than 4
 NCPUS=$(nproc 2>/dev/null || echo 4)
 BAZEL_JOBS="${BAZEL_JOBS:-$(( (NCPUS * 3 + 1) / 2 ))}"
-BAZEL_MEM_MB="${BAZEL_MEM_MB:-$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 2 ))}"
+# Cap JVM Heap at 8GB (8192MB) explicitly. Bazel's AST parser does not 
+# need 32GB on a 64GB node; leaving RAM available for Clang/LLD
+BAZEL_MEM_MB="${BAZEL_MEM_MB:-8192}"
 
 # ── Detect Ubuntu codename for LLVM apt repo ─────────────────────────────────
 UBUNTU_CODENAME=""
@@ -266,7 +268,7 @@ timer
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 5 — Build
 # ─────────────────────────────────────────────────────────────────────────────
-step "5/7  Bazel build  (--config=linux, ${BAZEL_JOBS} jobs)"
+step "5/7  Bazel build  (${BAZEL_JOBS} jobs)"
 cd "${REPO_DIR}"
 
 # Override JVM heap for this machine's available memory.
@@ -287,7 +289,6 @@ info "Targets: ${BUILD_TARGETS[*]}"
 BUILD_START=$(date +%s)
 
 bazel "${BAZEL_JVM_FLAGS[@]}" build \
-  --config=linux \
   --jobs="${BAZEL_JOBS}" \
   --local_resources="cpu=${NCPUS}" \
   --local_resources="memory=${BAZEL_MEM_MB}" \
@@ -307,7 +308,6 @@ if [[ "$MODE" == "test" ]]; then
   TEST_START=$(date +%s)
 
   bazel "${BAZEL_JVM_FLAGS[@]}" test \
-    --config=linux \
     --jobs="${BAZEL_JOBS}" \
     //src/engine:sandbox_test \
     --test_output=all \
@@ -364,7 +364,6 @@ if [[ "$MODE" == "server" ]]; then
 
   # exec replaces this shell so signals (SIGTERM, SIGINT) go directly to the server.
   exec bazel "${BAZEL_JVM_FLAGS[@]}" run \
-    --config=linux \
     //src/api:server \
     -- \
     --port="${SERVER_PORT}" \

@@ -12,7 +12,10 @@ bazel_dep(name = "rules_python", version = "1.1.0")
 bazel_dep(name = "abseil-cpp", version = "20250127.1", repo_name = "com_google_absl")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
-python.toolchain(python_version = "3.12")
+python.toolchain(
+    python_version = "3.12",
+    ignore_root_user_error = True,
+)
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(

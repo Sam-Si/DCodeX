@@ -1,151 +1,73 @@
 # ============================================================
-# 1. DYNAMIC GLOBAL CACHE
+# DCodeX: Linux / Docker Native Built-In Config
+# Optimized for maximum speed in isolated container environments
 # ============================================================
+
+# ------------------------------------------------------------
+# 1. DYNAMIC GLOBAL CACHE
+# ------------------------------------------------------------
 startup --output_base=/tmp/bazel-global-cache
 
-# ============================================================
-# 2. STARTUP: JVM & MEMORY (M1 Max Tuned)
-# ============================================================
+# ------------------------------------------------------------
+# 2. STARTUP: JVM & MEMORY (Linux Conservative)
+# ------------------------------------------------------------
 startup --max_idle_secs=10800
-startup --host_jvm_args=-Xmx16g
+# NOTE: Host JVM args are best explicitly passed by the 
+# dcodex-setup.sh script for runtime discovery, omitting hard limits here
 startup --host_jvm_args=-XX:+UseG1GC
 startup --host_jvm_args=-XX:MaxGCPauseMillis=20
 
-# ============================================================
+# ------------------------------------------------------------
 # 3. COMMON SETTINGS
-# ============================================================
+# ------------------------------------------------------------
 common --announce_rc
 common --color=yes
-common --watchfs
 common --incompatible_strict_action_env
 common --repository_cache=/tmp/bazel-repo-cache
 build --symlink_prefix=.bazel/
 
-# ============================================================
-# 4. DEFAULT PERFORMANCE (Speed > Binary Quality)
-# ============================================================
+# ------------------------------------------------------------
+# 4. DEFAULT PERFORMANCE (Speed > Build Size > Warnings)
+# ------------------------------------------------------------
 build --compilation_mode=fastbuild
 build --copt=-O0
 build --copt=-g0
+build --copt=-w
 build --strip=always
-build --features=-dsym_selection
 
-# Resource limits (Individual lines for syntax)
-build --local_resources=cpu=8
-build --local_resources=memory=24576
-build --jobs=8
+# ------------------------------------------------------------
+# 5. LINUX & DOCKER "SECRET SAUCE": Disable Sandboxing
+# Docker already provides an isolation boundary via namespaces.
+# Disabling Bazel's internal sandbox saves enormous overhead.
+# ------------------------------------------------------------
+build --spawn_strategy=local
+build --strategy=CppCompile=local
+build --strategy=CppLink=local
+build --genrule_strategy=local
 
-# I/O Speedups
-build --nolegacy_external_runfiles
+# ------------------------------------------------------------
+# 6. CACHING & FAST I/O
+# ------------------------------------------------------------
+build --disk_cache=/tmp/dcodex-bazel-cache
 build --nobuild_runfile_links
-build --reuse_sandbox_directories
+build --nolegacy_external_runfiles
 
-# ============================================================
-# 5. DOCKER CONFIG (--config=docker) - ULTRA PERFORMANCE
-# ============================================================
-# Matches your Rancher allocation (9 CPUs)
-build:docker --jobs=9
-build:docker --local_resources=cpu=9
-build:docker --local_resources=memory=32768
+# ------------------------------------------------------------
+# 7. LINUX COMPILER TOOLCHAIN (Clang & LLD)
+# lld is significantly faster than GNU ld for large C++ targets.
+# ------------------------------------------------------------
+build --repo_env=CC=clang
+build --repo_env=CXX=clang++
+build --linkopt=-fuse-ld=lld
 
-# Network-Only Remote Cache (Strictly for Docker)
-build:docker --remote_cache=grpc://host.docker.internal:9092
-build:docker --remote_cache_compression=true
-build:docker --remote_upload_local_results=true
-build:docker --remote_download_regex=.*
-build:docker --disk_cache=
-
-# The "Secret Sauce" for Docker-on-Mac Speed:
-# 1. Disable Sandboxing (Docker is already an isolated environment)
-build:docker --spawn_strategy=local
-build:docker --strategy=CppCompile=local
-build:docker --strategy=Javac=worker
-build:docker --genrule_strategy=local
-
-# 2. Performance & Workers
-build:docker --worker_max_instances=8
-build:docker --nobuild_runfile_links
-build:docker --action_env=PATH
-build:docker --strip=never
-build:docker --nowatchfs
-
-# 3. ULTRA LINKER & MEMORY
-build:docker --repo_env=CC=clang
-build:docker --repo_env=CXX=clang++
-build:docker --linkopt=-fuse-ld=lld
-build:docker --linkopt=-Wl,--threads=9
-build:docker --gc_thrashing_threshold=90
-build:docker --cc_output_directory_tag=docker
-build:docker --nolegacy_external_runfiles
-
-# ============================================================
-# 6. MACOS NATIVE CONFIG (--config=macos)
-# ============================================================
-build:macos --jobs=10
-build:macos --cpu=darwin_arm64
-build:macos --macos_cpus=arm64
-build:macos --apple_generate_dsym=false
-
-# Use Local Disk Cache only for macOS Host
-build:macos --disk_cache=~/Library/Caches/bazel-disk-cache
-
-build:macos --copt=-faligned-allocation
-build:macos --copt=-mmacosx-version-min=11.0
-build:macos --linkopt=-mmacosx-version-min=11.0
-
-# ============================================================
-# 7. LINUX CI CONFIG (--config=linux)
-# Optimised for typical 8-core Linux CI runners (GitHub Actions,
-# GCE, etc.). Focuses on: persistent disk cache, avoiding Bazel's
-# own sandbox overhead (tests run in their own ns already), fast
-# linking with lld, and saturating all available cores.
-# ============================================================
-
-# Persistent disk cache: survives across CI runs if the cache dir
-# is mounted / preserved between jobs (e.g. actions/cache).
-build:linux --disk_cache=/tmp/dcodex-bazel-cache
-
-# Skip Bazel's internal sandboxing for local actions — the OS-level
-# sandbox (seccomp/namespaces) is the real isolation boundary on Linux.
-build:linux --spawn_strategy=local
-build:linux --strategy=CppCompile=local
-build:linux --strategy=CppLink=local
-build:linux --genrule_strategy=local
-
-# Saturate cores: HOST_CPUS * 1.5 keeps the link step from stalling I/O.
-build:linux --jobs=12
-build:linux --local_resources=cpu=8
-build:linux --local_resources=memory=16384
-
-# lld is significantly faster than GNU ld for large C++ link steps.
-# On Ubuntu / Debian: apt install lld
-build:linux --linkopt=-fuse-ld=lld
-
-# Use clang for faster TU compilation (optional; comment out if gcc preferred).
-build:linux --repo_env=CC=clang
-build:linux --repo_env=CXX=clang++
-
-# No dsym / runfile symlinks on Linux.
-build:linux --nobuild_runfile_links
-build:linux --nolegacy_external_runfiles
-
-# Upload local results to remote cache if one is configured.
-# Set BAZEL_REMOTE_CACHE env var to enable, e.g.:
-#   export BAZEL_REMOTE_CACHE=grpc://cache.example.com:9092
-# build:linux --remote_cache=${BAZEL_REMOTE_CACHE}
-# build:linux --remote_cache_compression=true
-# build:linux --remote_upload_local_results=true
-
-# ============================================================
-# 8. DEV FAST ITERATION (--config=dev)
-# Disables optimisations entirely; maximises rebuild speed during
-# local development. Use for edit-compile-test loops.
-# ============================================================
-build:dev --compilation_mode=fastbuild
-build:dev --copt=-O0
-build:dev --copt=-g0
-build:dev --strip=always
-build:dev --spawn_strategy=local
-build:dev --strategy=CppCompile=local
-build:dev --nobuild_runfile_links
-build:dev --nolegacy_external_runfiles
+# ------------------------------------------------------------
+# 8. WORKERS & RESOURCE SCALING (Tuned for 16-Core / 64GB Node)
+# Container environments often misreport cgroups. Hard-coding 
+# prevents over-saturation.
+# ------------------------------------------------------------
+build --jobs=20
+build --local_resources=cpu=16
+build --local_resources=memory=57344
+build --worker_max_instances=16
+build --linkopt=-Wl,--threads=16
+build --gc_thrashing_threshold=95
