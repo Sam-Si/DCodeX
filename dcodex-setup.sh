@@ -56,12 +56,18 @@ SKIP_APT="${SKIP_APT:-0}"
 SLIM_IMAGE="${SLIM_IMAGE:-0}"   # 1 = purge build tools (good for Docker final image)
 NO_CLEAN="${NO_CLEAN:-1}"       # 1 = skip bazel clean (STRONGLY recommended)
 
-# Server flags
+# Server flags — tuned for production testing.
+#   CPU limit:    5s — enough for clang compilation + moderate loops.
+#   Wall timeout: 5s — kills truly-infinite loops promptly.
+#   Memory limit: 100MB — enough for normal programs; memory-exhaustion
+#                 examples (50MB/chunk) fail after 1-2 allocations.
+#   Output limit: 64KB — accommodates verbose examples (file_operations ~2KB);
+#                 catches runaway output (100KB+ triggers truncation).
 SERVER_PORT="${SERVER_PORT:-50051}"
-SERVER_CPU_LIMIT="${SERVER_CPU_LIMIT:-1}"
-SERVER_WALL_TIMEOUT="${SERVER_WALL_TIMEOUT:-3}"
-SERVER_MEM_LIMIT="${SERVER_MEM_LIMIT:-52428800}"  # 50 MB
-SERVER_OUTPUT_LIMIT="${SERVER_OUTPUT_LIMIT:-1024}" # 1 KB
+SERVER_CPU_LIMIT="${SERVER_CPU_LIMIT:-5}"
+SERVER_WALL_TIMEOUT="${SERVER_WALL_TIMEOUT:-5}"
+SERVER_MEM_LIMIT="${SERVER_MEM_LIMIT:-104857600}"   # 100 MB
+SERVER_OUTPUT_LIMIT="${SERVER_OUTPUT_LIMIT:-65536}"  # 64 KB
 
 # Compute job count: nproc * 1.5, round up, never less than 4
 NCPUS=$(nproc 2>/dev/null || echo 4)
@@ -359,7 +365,7 @@ if [[ "$MODE" == "server" ]]; then
   info "CPU limit:    ${SERVER_CPU_LIMIT}s"
   info "Wall timeout: ${SERVER_WALL_TIMEOUT}s"
   info "Memory limit: $(( SERVER_MEM_LIMIT / 1024 / 1024 ))MB"
-  info "Output limit: ${SERVER_OUTPUT_LIMIT} bytes"
+  info "Output limit: $(( SERVER_OUTPUT_LIMIT / 1024 ))KB"
   echo ""
 
   # exec replaces this shell so signals (SIGTERM, SIGINT) go directly to the server.

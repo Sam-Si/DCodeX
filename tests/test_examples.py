@@ -511,10 +511,10 @@ class TestSyntheticEdgeCases:
     def test_large_output_truncation(self, stub: Any) -> None:
         """Printing more than the output limit must trigger truncation.
 
-        The server's output limit varies (1KB default in some configs,
-        10KB in others). We print 200KB to exceed any reasonable limit.
+        The dcodex-setup.sh default is 64KB (configurable via
+        SERVER_OUTPUT_LIMIT). We print 200KB to comfortably exceed it.
         Truncation is detected via either the protobuf flag or the
-        truncation notice in stderr.
+        truncation notice in stderr — the server may use either channel.
         """
         code = "print('x' * 204800)\n"
         result = execute(stub, "python", code)
