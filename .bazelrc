@@ -6,7 +6,7 @@
 # ------------------------------------------------------------
 # 1. DYNAMIC GLOBAL CACHE
 # ------------------------------------------------------------
-startup --output_base=/tmp/bazel-global-cache
+startup --output_base=.bazel/output_base
 
 # ------------------------------------------------------------
 # 2. STARTUP: JVM & MEMORY (Linux Conservative)
@@ -23,7 +23,7 @@ startup --host_jvm_args=-XX:MaxGCPauseMillis=20
 common --announce_rc
 common --color=yes
 common --incompatible_strict_action_env
-common --repository_cache=/tmp/bazel-repo-cache
+common --repository_cache=.bazel/repo_cache
 build --symlink_prefix=.bazel/
 
 # ------------------------------------------------------------
@@ -48,26 +48,37 @@ build --genrule_strategy=local
 # ------------------------------------------------------------
 # 6. CACHING & FAST I/O
 # ------------------------------------------------------------
-build --disk_cache=/tmp/dcodex-bazel-cache
+build --disk_cache=.bazel/disk_cache
 build --nobuild_runfile_links
 build --nolegacy_external_runfiles
 
 # ------------------------------------------------------------
 # 7. LINUX COMPILER TOOLCHAIN (Clang & LLD)
-# lld is significantly faster than GNU ld for large C++ targets.
 # ------------------------------------------------------------
-build --repo_env=CC=clang
-build --repo_env=CXX=clang++
-build --linkopt=-fuse-ld=lld
+build:linux --repo_env=CC=clang
+build:linux --repo_env=CXX=clang++
+build:linux --linkopt=-fuse-ld=lld
 
 # ------------------------------------------------------------
-# 8. WORKERS & RESOURCE SCALING (Tuned for 16-Core / 64GB Node)
-# Container environments often misreport cgroups. Hard-coding 
-# prevents over-saturation.
+# 8. LINUX WORKERS & RESOURCES (16-Core / 64GB)
 # ------------------------------------------------------------
-build --jobs=20
-build --local_resources=cpu=16
-build --local_resources=memory=57344
-build --worker_max_instances=16
-build --linkopt=-Wl,--threads=16
-build --gc_thrashing_threshold=95
+build:linux --jobs=20
+build:linux --local_resources=cpu=16
+build:linux --local_resources=memory=57344
+build:linux --worker_max_instances=16
+build:linux --linkopt=-Wl,--threads=16
+build:linux --gc_thrashing_threshold=95
+
+# ------------------------------------------------------------
+# 9. MACOS CONFIGURATION (M1 / M-Series)
+# ------------------------------------------------------------
+build:macos --jobs=10
+build:macos --local_resources=cpu=8
+build:macos --local_resources=memory=16384
+build:macos --cpu=darwin_arm64
+build:macos --macos_cpus=arm64
+build:macos --apple_generate_dsym=false
+build:macos --copt=-faligned-allocation
+build:macos --copt=-mmacosx-version-min=12.0
+build:macos --linkopt=-mmacosx-version-min=12.0
+build:macos --features=-layering_check

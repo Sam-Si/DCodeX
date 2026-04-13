@@ -446,7 +446,7 @@ absl::Status RunProcessStep::ExecuteStep(ExecutionContext& context) {
     // Interpreted language: run with interpreter
     // Detect language from source file extension
     if (context.source_file_path.ends_with(".py")) {
-      argv = {"python", "-u", context.source_file_path};
+      argv = {"python3", "-u", context.source_file_path};
     } else {
       // Default: try to execute directly
       argv = {context.source_file_path};

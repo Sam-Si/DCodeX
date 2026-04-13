@@ -11,9 +11,9 @@
 #   NO_CLEAN=0 ./dcodex-setup.sh      # force bazel clean (rarely needed)
 #
 # Environment overrides:
-#   REPO_DIR          — path to DCodeX repo        (default: /testbed/DCodeX)
-#   BAZEL_DISK_CACHE  — bazel action cache dir      (default: /tmp/dcodex-bazel-cache)
-#   BAZEL_REPO_CACHE  — bazel repository cache dir  (default: /tmp/bazel-repo-cache)
+#   REPO_DIR          — path to DCodeX repo         (default: /testbed/DCodeX)
+#   BAZEL_DISK_CACHE  — bazel action cache dir      (default: .bazel/disk_cache)
+#   BAZEL_REPO_CACHE  — bazel repository cache dir  (default: .bazel/repo_cache)
 #   LLVM_VERSION      — LLVM version to install     (default: 19)
 #   BAZEL_JOBS        — parallel build jobs         (default: nproc * 1.5)
 #   SERVER_PORT, SERVER_CPU_LIMIT, SERVER_WALL_TIMEOUT, SERVER_MEM_LIMIT, SERVER_OUTPUT_LIMIT
@@ -49,8 +49,8 @@ done
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 REPO_DIR="${REPO_DIR:-/testbed/DCodeX}"
-BAZEL_DISK_CACHE="${BAZEL_DISK_CACHE:-/tmp/dcodex-bazel-cache}"
-BAZEL_REPO_CACHE="${BAZEL_REPO_CACHE:-/tmp/bazel-repo-cache}"
+BAZEL_DISK_CACHE="${BAZEL_DISK_CACHE:-${REPO_DIR}/.bazel/disk_cache}"
+BAZEL_REPO_CACHE="${BAZEL_REPO_CACHE:-${REPO_DIR}/.bazel/repo_cache}"
 LLVM_VERSION="${LLVM_VERSION:-19}"
 SKIP_APT="${SKIP_APT:-0}"
 SLIM_IMAGE="${SLIM_IMAGE:-0}"   # 1 = purge build tools (good for Docker final image)
