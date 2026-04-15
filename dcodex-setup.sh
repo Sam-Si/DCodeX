@@ -227,12 +227,40 @@ else
   ok "bazelisk installed at /usr/local/bin/bazel"
 fi
 
+if [[ ! -f "${REPO_DIR}/bazelisk" ]]; then
+  info "Downloading local copy of bazelisk into ${REPO_DIR}/bazelisk..."
+  curl -fsSL \
+    "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-${BAZEL_ARCH}" \
+    -o "${REPO_DIR}/bazelisk"
+  chmod +x "${REPO_DIR}/bazelisk"
+fi
+
 timer
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 3 — Python + gRPC tooling
 # ─────────────────────────────────────────────────────────────────────────────
 step "3/7  Python & gRPC tooling"
+
+info "Installing grpcurl..."
+if cmd_exists grpcurl; then
+  ok "grpcurl already installed"
+else
+  GRPCURL_ARCH="x86_64"
+  [[ "$ARCH" == "aarch64" ]] && GRPCURL_ARCH="arm64"
+  curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.3/grpcurl_1.9.3_linux_${GRPCURL_ARCH}.tar.gz" | tar -xz -C /usr/local/bin grpcurl
+  chmod +x /usr/local/bin/grpcurl
+  ok "grpcurl installed at /usr/local/bin/grpcurl"
+fi
+
+if [[ ! -f "${REPO_DIR}/bin/grpcurl" ]]; then
+  info "Downloading local copy of grpcurl into ${REPO_DIR}/bin/grpcurl..."
+  mkdir -p "${REPO_DIR}/bin"
+  GRPCURL_ARCH="x86_64"
+  [[ "$ARCH" == "aarch64" ]] && GRPCURL_ARCH="arm64"
+  curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.3/grpcurl_1.9.3_linux_${GRPCURL_ARCH}.tar.gz" | tar -xz -C "${REPO_DIR}/bin" grpcurl
+  chmod +x "${REPO_DIR}/bin/grpcurl"
+fi
 
 info "Upgrading pip..."
 python -m pip install --quiet --upgrade pip
@@ -313,20 +341,42 @@ if [[ "$MODE" == "test" ]]; then
   info "Running sandbox integration tests..."
   TEST_START=$(date +%s)
 
+  set +e
   bazel "${BAZEL_JVM_FLAGS[@]}" test \
     --jobs="${BAZEL_JOBS}" \
-    //src/engine:sandbox_test \
-    --test_output=all \
+    --config=asan \
+    //... \
     --test_env=HOME=/tmp \
-    2>&1 | tee /tmp/dcodex-test.log
+    2>&1 | tee /tmp/dcodex-test-asan.log
+  TEST_STATUS_ASAN=$?
+  set -e
 
-  TEST_STATUS=${PIPESTATUS[0]}
+  set +e
+  bazel "${BAZEL_JVM_FLAGS[@]}" test \
+    --jobs="${BAZEL_JOBS}" \
+    --config=msan \
+    //... \
+    --test_env=HOME=/tmp \
+    2>&1 | tee /tmp/dcodex-test-msan.log
+  TEST_STATUS_MSAN=$?
+  set -e
+
+  set +e
+  bazel "${BAZEL_JVM_FLAGS[@]}" test \
+    --jobs="${BAZEL_JOBS}" \
+    --config=tsan \
+    //... \
+    --test_env=HOME=/tmp \
+    2>&1 | tee /tmp/dcodex-test-tsan.log
+  TEST_STATUS_TSAN=$?
+  set -e
+
   TEST_END=$(date +%s)
 
-  if [[ $TEST_STATUS -eq 0 ]]; then
+  if [[ $TEST_STATUS_ASAN -eq 0 && $TEST_STATUS_MSAN -eq 0 && $TEST_STATUS_TSAN -eq 0 ]]; then
     ok "All tests passed in $(( TEST_END - TEST_START ))s"
   else
-    die "Tests FAILED (exit ${TEST_STATUS}) — see /tmp/dcodex-test.log"
+    die "Tests FAILED (asan: ${TEST_STATUS_ASAN}, msan: ${TEST_STATUS_MSAN}, tsan: ${TEST_STATUS_TSAN}) — see /tmp/dcodex-test-*.log"
   fi
 else
   info "Skipping tests (pass --test to run them)"

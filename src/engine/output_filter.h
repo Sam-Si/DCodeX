@@ -27,7 +27,7 @@ class OutputFilterStrategy {
 
 class DefaultOutputFilterStrategy final : public OutputFilterStrategy {
  public:
-  bool ShouldSuppress(absl::string_view chunk) const override {
+  bool ShouldSuppress(absl::string_view /*chunk*/) const override {
     // Disabled filtering for debugging to see all Rosetta output.
     return false;
   }

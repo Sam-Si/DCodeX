@@ -180,15 +180,15 @@ absl::StatusOr<ExecutionResult> RunCommandWithSandbox(
   FeedStdin(stdin_p, input, trace);
 
   // Use gRPC Alarm-based timeout manager instead of fork-based watcher
-  std::atomic<bool> timed_out_flag{false};
+  auto timed_out_flag = std::make_shared<std::atomic<bool>>(false);
   std::unique_ptr<ProcessTimeoutManager> timeout_manager;
 
   if (sandboxed) {
     const absl::Duration timeout = absl::Seconds(
         absl::GetFlag(FLAGS_sandbox_wall_clock_timeout_seconds));
     timeout_manager = std::make_unique<ProcessTimeoutManager>(
-        process.Get(), timeout, [&timed_out_flag, pid = process.Get()]() {
-          timed_out_flag.store(true);
+        process.Get(), timeout, [timed_out_flag, pid = process.Get()]() {
+          timed_out_flag->store(true);
           if (kill(pid, 0) == 0) {
             kill(pid, SIGKILL);
           }
@@ -215,7 +215,7 @@ absl::StatusOr<ExecutionResult> RunCommandWithSandbox(
   // Release ownership since we've reaped it
   (void)process.Release();
 
-  return BuildExecutionResult(status, usage, start, timed_out_flag.load(),
+  return BuildExecutionResult(status, usage, start, timed_out_flag->load(),
                               truncated);
 }
 

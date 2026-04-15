@@ -36,7 +36,16 @@ class ExecutionContext;
 // -----------------------------------------------------------------------------
 class ExecutionStep {
  public:
+  ExecutionStep() = default;
   virtual ~ExecutionStep() = default;
+
+  // Disallow copy.
+  ExecutionStep(const ExecutionStep&) = delete;
+  ExecutionStep& operator=(const ExecutionStep&) = delete;
+
+  // Allow move.
+  ExecutionStep(ExecutionStep&&) = default;
+  ExecutionStep& operator=(ExecutionStep&&) = default;
 
   // Sets the next step in the chain.
   // Returns the next step pointer to allow chaining.
