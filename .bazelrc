@@ -1,6 +1,6 @@
 # ============================================================
 # DCodeX: Linux / Docker Native Built-In Config
-# Optimized for maximum speed in isolated container environments
+# Optimized for MAXIMUM ACCURACY AND CORRECTNESS
 # ============================================================
 
 # ------------------------------------------------------------
@@ -9,13 +9,10 @@
 startup --output_base=.bazel/output_base
 
 # ------------------------------------------------------------
-# 2. STARTUP: JVM & MEMORY (Linux Conservative)
+# 2. STARTUP: JVM & MEMORY
 # ------------------------------------------------------------
 startup --max_idle_secs=10800
-# NOTE: Host JVM args are best explicitly passed by the 
-# dcodex-setup.sh script for runtime discovery, omitting hard limits here
 startup --host_jvm_args=-XX:+UseG1GC
-startup --host_jvm_args=-XX:MaxGCPauseMillis=20
 
 # ------------------------------------------------------------
 # 3. COMMON SETTINGS
@@ -27,57 +24,119 @@ common --repository_cache=.bazel/repo_cache
 build --symlink_prefix=.bazel/
 
 # ------------------------------------------------------------
-# 4. DEFAULT PERFORMANCE (Speed > Build Size > Warnings)
+# 4. DEFAULT PERFORMANCE (Accuracy & Correctness > Speed)
 # ------------------------------------------------------------
-build --compilation_mode=fastbuild
-build --copt=-O0
-build --copt=-g0
-build --copt=-w
-build --strip=always
+build --compilation_mode=dbg
+build --copt=-O1
+build --copt=-g3
+build --copt=-Wall
+build --copt=-Wextra
+build --copt=-Werror
+build --strip=never
 
 # ------------------------------------------------------------
-# 5. LINUX & DOCKER "SECRET SAUCE": Disable Sandboxing
-# Docker already provides an isolation boundary via namespaces.
-# Disabling Bazel's internal sandbox saves enormous overhead.
+# 5. SANDBOXING (Strict isolation for accuracy)
+# NOTE: Bazel's Linux sandbox uses user namespaces (unshare).
+#   If running inside Docker, you may need --privileged or
+#   --security-opt seccomp=unconfined on the container.
+#   If that is not possible, fall back to --spawn_strategy=local.
 # ------------------------------------------------------------
-build --spawn_strategy=local
-build --strategy=CppCompile=local
-build --strategy=CppLink=local
-build --genrule_strategy=local
+build --spawn_strategy=sandboxed
+build --strategy=CppCompile=sandboxed
+build --strategy=CppLink=sandboxed
+build --genrule_strategy=sandboxed
 
 # ------------------------------------------------------------
-# 6. CACHING & FAST I/O
+# 6. CACHING 
 # ------------------------------------------------------------
 build --disk_cache=.bazel/disk_cache
 build --nobuild_runfile_links
 build --nolegacy_external_runfiles
 
 # ------------------------------------------------------------
-# 7. LINUX COMPILER TOOLCHAIN (Clang & LLD)
+# 7. DEFAULT TO LINUX CONFIG
+# ------------------------------------------------------------
+build --config=linux
+
+# ------------------------------------------------------------
+# 8. LINUX COMPILER TOOLCHAIN & RESOURCES
 # ------------------------------------------------------------
 build:linux --repo_env=CC=clang
 build:linux --repo_env=CXX=clang++
 build:linux --linkopt=-fuse-ld=lld
-
-# ------------------------------------------------------------
-# 8. LINUX WORKERS & RESOURCES (16-Core / 64GB)
-# ------------------------------------------------------------
 build:linux --jobs=20
 build:linux --local_resources=cpu=16
 build:linux --local_resources=memory=57344
 build:linux --worker_max_instances=16
 build:linux --linkopt=-Wl,--threads=16
-build:linux --gc_thrashing_threshold=95
 
 # ------------------------------------------------------------
-# 9. MACOS CONFIGURATION (M1 / M-Series)
+# 9. SANITIZER CONFIGURATIONS (TSAN, MSAN, ASAN)
+# All sanitizers are mutually exclusive. Run them separately.
+# The disk_cache ensures switching between them is near-instant.
+# ------------------------------------------------------------
+
+# -- Shared Sanitizer Base --
+# These flags apply to ALL sanitizer configurations.
+# -fno-omit-frame-pointer: preserves the call stack for accurate reports.
+# -fno-optimize-sibling-calls: prevents tail-call optimization from
+#   collapsing stack frames, ensuring complete traces.
+build:sanitizer_common --copt=-fno-omit-frame-pointer
+build:sanitizer_common --copt=-fno-optimize-sibling-calls
+test:sanitizer_common --test_output=all
+test:sanitizer_common --test_timeout=300,900,1800,7200
+test:sanitizer_common --test_verbose_timeout_warnings
+
+# -- TSan: ThreadSanitizer --
+# Usage: bazel test --config=tsan //...
+# Detects: data races, deadlocks, lock-order inversions, misuse of atomics.
+build:tsan --config=sanitizer_common
+build:tsan --copt=-fsanitize=thread
+build:tsan --linkopt=-fsanitize=thread
+build:tsan --copt=-DTHREAD_SANITIZER
+test:tsan --action_env=TSAN_OPTIONS="history_size=7:halt_on_error=1:detect_deadlocks=1:second_deadlock_stack=1:strict_memcmp=1:report_atomic_races=1:force_seq_cst_atomics=1"
+test:tsan --runs_per_test=100
+test:tsan --local_test_jobs=10
+
+# -- MSan: MemorySanitizer --
+# Usage: bazel test --config=msan //...
+# Detects: reads of uninitialized memory.
+# WARNING: MSan requires ALL linked libraries (including libc++) to be
+#   compiled with -fsanitize=memory. If you see false positives from
+#   std::string / std::vector, you must provide an MSan-instrumented
+#   libc++ via: build:msan --linkopt=-stdlib=libc++ (custom build).
+build:msan --config=sanitizer_common
+build:msan --copt=-fsanitize=memory
+build:msan --copt=-fsanitize-memory-track-origins=2
+build:msan --linkopt=-fsanitize=memory
+build:msan --copt=-DMEMORY_SANITIZER
+test:msan --action_env=MSAN_OPTIONS="halt_on_error=1:exitcode=77"
+
+# -- ASan + UBSan: AddressSanitizer + UndefinedBehaviorSanitizer --
+# Usage: bazel test --config=asan //...
+# ASan detects: use-after-free, heap/stack buffer overflow, double-free,
+#   memory leaks. Critical for concurrency: catches Thread A freeing
+#   memory that Thread B is still reading.
+# UBSan detects: signed integer overflow, null dereference, misaligned
+#   pointers, type punning violations. These are paired because their
+#   shadow memory maps do not conflict.
+build:asan --config=sanitizer_common
+build:asan --copt=-fsanitize=address,undefined
+build:asan --linkopt=-fsanitize=address,undefined
+build:asan --copt=-fno-sanitize-recover=all
+build:asan --copt=-DADDRESS_SANITIZER
+test:asan --action_env=ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
+test:asan --action_env=UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
+
+# ------------------------------------------------------------
+# 10. MACOS CONFIGURATION (M1 / M-Series)
 # ------------------------------------------------------------
 build:macos --jobs=10
 build:macos --local_resources=cpu=8
 build:macos --local_resources=memory=16384
 build:macos --cpu=darwin_arm64
 build:macos --macos_cpus=arm64
-build:macos --apple_generate_dsym=false
+build:macos --apple_generate_dsym=true
 build:macos --copt=-faligned-allocation
 build:macos --copt=-mmacosx-version-min=12.0
 build:macos --linkopt=-mmacosx-version-min=12.0
