@@ -29,9 +29,9 @@ build --symlink_prefix=.bazel/
 build --compilation_mode=dbg
 build --copt=-O1
 build --copt=-g3
-build --copt=-Wall
-build --copt=-Wextra
-build --copt=-Werror
+build --per_file_copt=^src/.*@-Wall
+build --per_file_copt=^src/.*@-Wextra
+build --per_file_copt=^src/.*@-Werror
 build --strip=never
 
 # ------------------------------------------------------------
