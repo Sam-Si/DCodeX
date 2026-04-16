@@ -83,6 +83,7 @@ build:linux --linkopt=-Wl,--threads=16
 #   collapsing stack frames, ensuring complete traces.
 build:sanitizer_common --copt=-fno-omit-frame-pointer
 build:sanitizer_common --copt=-fno-optimize-sibling-calls
+build:sanitizer_common --features=-layering_check
 test:sanitizer_common --test_output=all
 test:sanitizer_common --test_timeout=300,900,1800,7200
 test:sanitizer_common --test_verbose_timeout_warnings

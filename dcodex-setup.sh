@@ -195,6 +195,17 @@ http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-${LLVM
     ok "LLVM ${LLVM_VERSION} installed"
   fi
 
+  # ── Sanitizer runtime headers (needed for --config=asan/msan/tsan) ───────
+  # The sanitizer headers (sanitizer/asan_interface.h, sanitizer/lsan_interface.h)
+  # are NOT shipped with the base clang package. Without them, abseil-cpp and
+  # gRPC fail to compile under any sanitizer configuration.
+  info "Ensuring sanitizer runtime headers are installed..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    "libclang-rt-${LLVM_VERSION}-dev" \
+    2>/dev/null \
+    || warn "libclang-rt-${LLVM_VERSION}-dev not available — sanitizer builds may fail"
+  ok "Sanitizer runtime headers installed"
+
   # ── Symlinks ─────────────────────────────────────────────────────────────
   info "Creating LLVM symlinks..."
   ln -sf "/usr/bin/clang-${LLVM_VERSION}"   /usr/bin/clang
