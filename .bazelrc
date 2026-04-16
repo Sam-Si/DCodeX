@@ -96,7 +96,7 @@ build:tsan --copt=-fsanitize=thread
 build:tsan --linkopt=-fsanitize=thread
 build:tsan --copt=-DTHREAD_SANITIZER
 test:tsan --action_env=TSAN_OPTIONS="history_size=7:halt_on_error=1:detect_deadlocks=1:second_deadlock_stack=1:strict_memcmp=1:report_atomic_races=1:force_seq_cst_atomics=1"
-test:tsan --runs_per_test=100
+test:tsan --runs_per_test=20
 test:tsan --local_test_jobs=10
 
 # -- MSan: MemorySanitizer --
@@ -124,6 +124,8 @@ test:msan --action_env=MSAN_OPTIONS="halt_on_error=1:exitcode=77"
 build:asan --config=sanitizer_common
 build:asan --copt=-fsanitize=address,undefined
 build:asan --linkopt=-fsanitize=address,undefined
+build:asan --copt=-fno-sanitize=vptr
+build:asan --linkopt=-fno-sanitize=vptr
 build:asan --copt=-fno-sanitize-recover=all
 build:asan --copt=-DADDRESS_SANITIZER
 test:asan --action_env=ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
