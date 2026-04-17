@@ -296,7 +296,12 @@ void ProcessTimeoutManager::Start() {
 
   auto deadline = absl::ToChronoTime(absl::Now() + state_->timeout);
   
-  state_->alarm.Set(deadline, [state = state_](bool ok) {
+  std::weak_ptr<ProcessTimeoutState> weak_state = state_;
+  state_->alarm.Set(deadline, [weak_state](bool ok) {
+    auto state = weak_state.lock();
+    if (!state) {
+      return;
+    }
     {
       std::lock_guard<std::mutex> lock(state->mutex);
       if (state->cancelled || !ok) {

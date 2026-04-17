@@ -152,6 +152,18 @@ cc_library(
 # #ifdef __linux__ inside the test file; they run cleanly on macOS as no-ops.
 
 cc_test(
+    name = "warm_worker_pool_test",
+    srcs = ["warm_worker_pool_test.cc"],
+    copts = ["-std=c++23"],
+    deps = [
+        ":warm_worker_pool",
+        "@com_google_absl//absl/synchronization",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "sandbox_test",
     srcs = ["sandbox_test.cc"],
     copts = ["-std=c++23"],
@@ -168,5 +180,13 @@ cc_test(
         "@com_google_absl//absl/time",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
+    ],
+)
+
+test_suite(
+    name = "concurrency_tests",
+    tests = [
+        ":warm_worker_pool_test",
+        ":sandbox_test",
     ],
 )

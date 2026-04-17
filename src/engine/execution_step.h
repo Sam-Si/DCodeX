@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
@@ -110,6 +112,14 @@ class ExecutionContext {
         stdin_data(stdin_data),
         callback(std::move(callback)) {
     trace << "--- Backend Execution Trace ---\n";
+  }
+
+  ~ExecutionContext() {
+    for (const auto& path : cleanup_paths) {
+      if (!path.empty()) {
+        unlink(path.c_str());
+      }
+    }
   }
 
   // Adds a path to be cleaned up when context is destroyed
