@@ -21,6 +21,9 @@ common --announce_rc
 common --color=yes
 common --incompatible_strict_action_env
 common --repository_cache=.bazel/repo_cache
+
+# Enable automatic platform-specific config (build:macos, build:linux, etc.)
+common --enable_platform_specific_config
 build --symlink_prefix=.bazel/
 
 # ------------------------------------------------------------
@@ -54,9 +57,10 @@ build --nobuild_runfile_links
 build --nolegacy_external_runfiles
 
 # ------------------------------------------------------------
-# 7. DEFAULT TO LINUX CONFIG
+# 7. PLATFORM CONFIGURATIONS
 # ------------------------------------------------------------
-build --config=linux
+# Handled automatically via --enable_platform_specific_config
+# which maps build:linux and build:macos based on the host OS.
 
 # ------------------------------------------------------------
 # 8. LINUX COMPILER TOOLCHAIN & RESOURCES
