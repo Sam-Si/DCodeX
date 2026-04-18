@@ -135,14 +135,17 @@ cc_library(
 )
 
 cc_library(
-    name = "warm_worker_pool",
-    srcs = ["warm_worker_pool.cpp"],
-    hdrs = ["warm_worker_pool.h"],
+    name = "dynamic_worker_coordinator",
+    srcs = ["dynamic_worker_coordinator.cpp"],
+    hdrs = ["dynamic_worker_coordinator.h"],
     copts = ["-std=c++23"],
     deps = [
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
     ],
     visibility = ["//visibility:public"],
 )
@@ -152,12 +155,14 @@ cc_library(
 # #ifdef __linux__ inside the test file; they run cleanly on macOS as no-ops.
 
 cc_test(
-    name = "warm_worker_pool_test",
-    srcs = ["warm_worker_pool_test.cc"],
+    name = "dynamic_worker_coordinator_test",
+    srcs = ["dynamic_worker_coordinator_test.cc"],
     copts = ["-std=c++23"],
+    linkstatic = True,
     deps = [
-        ":warm_worker_pool",
+        ":dynamic_worker_coordinator",
         "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -170,9 +175,10 @@ cc_test(
     # Tests that exercise real subprocesses need longer timeouts.
     # --test_timeout=120 covers CPU-burn tests that run for ~5 seconds each.
     timeout = "moderate",
+    linkstatic = True,
     deps = [
         ":sandbox",
-        ":warm_worker_pool",
+        ":dynamic_worker_coordinator",
         "//src/common:execution_cache",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/status",
@@ -186,7 +192,7 @@ cc_test(
 test_suite(
     name = "concurrency_tests",
     tests = [
-        ":warm_worker_pool_test",
+        ":dynamic_worker_coordinator_test",
         ":sandbox_test",
     ],
 )

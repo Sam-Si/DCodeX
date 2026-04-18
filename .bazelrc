@@ -53,8 +53,6 @@ build --genrule_strategy=sandboxed
 # 6. CACHING 
 # ------------------------------------------------------------
 build --disk_cache=.bazel/disk_cache
-build --nobuild_runfile_links
-build --nolegacy_external_runfiles
 
 # ------------------------------------------------------------
 # 7. PLATFORM CONFIGURATIONS
