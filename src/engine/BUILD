@@ -140,6 +140,7 @@ cc_library(
     hdrs = ["warm_worker_pool.h"],
     copts = ["-std=c++23"],
     deps = [
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/synchronization",
