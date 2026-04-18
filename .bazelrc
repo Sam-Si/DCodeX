@@ -49,6 +49,9 @@ build --linkopt=-Wl,--threads=16
 build:linux --sandbox_tmpfs_path=/tmp
 build:linux --sandbox_add_mount_pair=/dev/null
 build:linux --test_tmpdir=/tmp/bazel-test-logs
+build:linux --dynamic_mode=off
+build:linux --experimental_sandbox_async_tree_delete
+build:linux --sandbox_graceful_shutdown
 
 # ------------------------------------------------------------
 # 5. SANDBOXING (Strict isolation for accuracy)
