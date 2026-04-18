@@ -41,6 +41,10 @@ build --local_resources=cpu=16
 build --local_resources=memory=57344
 build --linkopt=-Wl,--threads=16
 
+# Linux Sandbox Hardening: Fixes "File exists" and "/dev/null" errors
+build:linux --sandbox_tmpfs_path=/tmp
+build:linux --sandbox_add_mount_pair=/dev/null
+
 # ------------------------------------------------------------
 # 5. SANDBOXING (Strict isolation for accuracy)
 # NOTE: Bazel's Linux sandbox uses user namespaces (unshare).

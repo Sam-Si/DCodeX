@@ -172,6 +172,7 @@ cc_test(
     name = "warm_worker_pool_test",
     srcs = ["warm_worker_pool_test.cc"],
     copts = ["-std=c++23"],
+    linkstatic = True,
     deps = [
         ":warm_worker_pool",
         "@com_google_absl//absl/synchronization",
