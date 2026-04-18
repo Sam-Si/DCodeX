@@ -25,7 +25,7 @@
 #include "proto/sandbox.grpc.pb.h"
 #include "src/common/execution_cache.h"
 #include "src/engine/sandbox.h"
-#include "src/engine/warm_worker_pool.h"
+#include "src/engine/dynamic_worker_coordinator.h"
 
 namespace dcodex {
 
@@ -44,7 +44,7 @@ class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
 
  private:
   std::atomic<int> active_sandboxes_;
-  WarmWorkerPool worker_pool_;
+  DynamicWorkerCoordinator worker_pool_;
   std::shared_ptr<SandboxedProcess> executor_;
 
   mutable absl::Mutex reject_mutex_;

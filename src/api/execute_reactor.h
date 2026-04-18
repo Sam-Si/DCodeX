@@ -24,7 +24,7 @@
 #include "absl/synchronization/mutex.h"
 #include "proto/sandbox.grpc.pb.h"
 #include "src/engine/sandbox.h"
-#include "src/engine/warm_worker_pool.h"
+#include "src/engine/dynamic_worker_coordinator.h"
 
 namespace dcodex {
 
@@ -78,7 +78,7 @@ class ExecuteReactor final : public grpc::ServerWriteReactor<ExecutionLog>,
                             public WorkerTask {
  public:
   ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter,
-                 WarmWorkerPool* pool, std::shared_ptr<SandboxedProcess> executor);
+                 DynamicWorkerCoordinator* pool, std::shared_ptr<SandboxedProcess> executor);
 
   void StartExecution() override;
   void PumpWrites() override;
@@ -89,7 +89,7 @@ class ExecuteReactor final : public grpc::ServerWriteReactor<ExecutionLog>,
 
  private:
   std::shared_ptr<ReactorInternalState> shared_state_;
-  WarmWorkerPool* pool_;
+  DynamicWorkerCoordinator* pool_;
   std::shared_ptr<SandboxedProcess> executor_;
 };
 

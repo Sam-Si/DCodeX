@@ -46,7 +46,11 @@ void RejectReactor::OnDone() {
 CodeExecutorServiceImpl::CodeExecutorServiceImpl(int max_sandboxes,
                                                  std::shared_ptr<CacheInterface> cache)
     : active_sandboxes_(0),
-      worker_pool_(max_sandboxes),
+      worker_pool_([max_sandboxes]() {
+        DynamicWorkerCoordinator::Options opts;
+        opts.max_workers = max_sandboxes;
+        return opts;
+      }()),
       executor_(std::make_shared<SandboxedProcess>(std::move(cache))) {
   worker_pool_.Start();
 }
@@ -79,9 +83,12 @@ grpc::ServerWriteReactor<ExecutionLog>* CodeExecutorServiceImpl::Execute(
   }
   auto reactor = std::make_shared<ExecuteReactor>(request, active_sandboxes_,
                                                    &worker_pool_, executor_);
-  absl::Status assignment = worker_pool_.AcquireWorker(reactor);
+  
+  LanguageId lang = ParseLanguageId(request->language());
+  absl::StatusOr<WorkerTask*> assignment = worker_pool_.LeaseWorker(lang, reactor);
+  
   if (!assignment.ok()) {
-    LOG(WARNING) << "Worker pool rejected request: " << assignment;
+    LOG(WARNING) << "Worker pool rejected request: " << assignment.status();
     auto reject_reactor = std::make_shared<RejectReactor>(
         "Worker pool rejected request", this);
     TrackRejectReactor(reject_reactor);

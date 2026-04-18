@@ -17,9 +17,7 @@
 namespace dcodex {
 
 WarmWorkerPool::WarmWorkerPool(int max_workers)
-    : max_workers_(max_workers),
-      idle_workers_(0),
-      shutting_down_(false) {}
+    : max_workers_(max_workers) {}
 
 WarmWorkerPool::~WarmWorkerPool() { Shutdown(); }
 
@@ -37,29 +35,46 @@ void WarmWorkerPool::Start() {
 }
 
 void WarmWorkerPool::Shutdown() {
-  absl::MutexLock lock(&mutex_);
-  if (shutting_down_) {
+  if (shutting_down_.exchange(true)) {
     return;
   }
-  shutting_down_ = true;
+  // No need to lock mutex_ just to notify workers, 
+  // as the workers_ vector is constant after Start().
   for (const auto& worker : workers_) {
     worker->Notify();
+  }
+  // Wait for all workers to finish.
+  for (const auto& worker : workers_) {
+    worker->Join();
+  }
+  {
+    absl::MutexLock lock(&mutex_);
+    active_tasks_.clear();
+    workers_.clear();
   }
 }
 
 absl::Status WarmWorkerPool::AcquireWorker(std::shared_ptr<WorkerTask> task) {
-  absl::MutexLock lock(&mutex_);
-  if (shutting_down_) {
+  if (shutting_down_.load(std::memory_order_relaxed)) {
     return absl::FailedPreconditionError("Worker pool is shutting down");
   }
-  if (idle_workers_ == 0) {
+  
+  // Quick check before locking.
+  if (idle_workers_.load(std::memory_order_relaxed) <= 0) {
     return absl::ResourceExhaustedError("No idle workers available");
   }
+
+  absl::MutexLock lock(&mutex_);
+  // Re-check after locking.
+  if (shutting_down_.load(std::memory_order_relaxed)) {
+    return absl::FailedPreconditionError("Worker pool is shutting down");
+  }
+
   WorkerTask* raw_task = task.get();
   for (const auto& worker : workers_) {
     if (worker->TryAssign(task)) {
       active_tasks_.emplace(raw_task, std::move(task));
-      idle_workers_--;
+      idle_workers_.fetch_sub(1, std::memory_order_relaxed);
       return absl::OkStatus();
     }
   }
@@ -67,8 +82,7 @@ absl::Status WarmWorkerPool::AcquireWorker(std::shared_ptr<WorkerTask> task) {
 }
 
 void WarmWorkerPool::NotifyWorkerIdle() {
-  absl::MutexLock lock(&mutex_);
-  idle_workers_++;
+  idle_workers_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void WarmWorkerPool::ReleaseTask(WorkerTask* task) {
@@ -93,15 +107,15 @@ bool WarmWorkerPool::Worker::TryAssign(std::shared_ptr<WorkerTask> task) {
 }
 
 void WarmWorkerPool::Worker::Notify() {
+  stopping_.store(true, std::memory_order_relaxed);
   absl::MutexLock lock(&mutex_);
-  stopping_ = true;
   cv_.Signal();
 }
 
 void WarmWorkerPool::Worker::Join() {
+  stopping_.store(true, std::memory_order_relaxed);
   {
     absl::MutexLock lock(&mutex_);
-    stopping_ = true;
     cv_.Signal();
   }
   if (thread_.joinable()) {
@@ -114,18 +128,21 @@ void WarmWorkerPool::Worker::Run() {
     std::shared_ptr<WorkerTask> task;
     {
       absl::MutexLock lock(&mutex_);
-      while (task_ == nullptr && !stopping_) {
+      while (task_ == nullptr && !stopping_.load(std::memory_order_relaxed)) {
         cv_.Wait(&mutex_);
       }
-      if (stopping_) {
+      if (stopping_.load(std::memory_order_relaxed) && task_ == nullptr) {
         break;
       }
       task = std::move(task_);
     }
-    task->StartExecution();
-    task->PumpWrites();
-    pool_->NotifyWorkerIdle();
-    task.reset();
+    
+    if (task) {
+      task->StartExecution();
+      task->PumpWrites();
+      pool_->NotifyWorkerIdle();
+      task.reset();
+    }
   }
 }
 

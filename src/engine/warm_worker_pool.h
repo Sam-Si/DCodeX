@@ -15,6 +15,7 @@
 #ifndef SRC_ENGINE_WARM_WORKER_POOL_H_
 #define SRC_ENGINE_WARM_WORKER_POOL_H_
 
+#include <atomic>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -67,7 +68,7 @@ class WarmWorkerPool {
     std::shared_ptr<WorkerTask> task_;
     mutable absl::Mutex mutex_;
     absl::CondVar cv_;
-    bool stopping_ = false;
+    std::atomic<bool> stopping_{false};
     std::thread thread_;
   };
 
@@ -75,8 +76,8 @@ class WarmWorkerPool {
   absl::flat_hash_map<WorkerTask*, std::shared_ptr<WorkerTask>> active_tasks_;
   std::vector<std::unique_ptr<Worker>> workers_;
   int max_workers_;
-  int idle_workers_;
-  bool shutting_down_;
+  std::atomic<int> idle_workers_{0};
+  std::atomic<bool> shutting_down_{false};
 };
 
 }  // namespace dcodex

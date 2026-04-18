@@ -28,8 +28,9 @@ namespace {
 
 class TestTask : public WorkerTask {
  public:
-  TestTask(std::atomic<int>* counter, absl::Notification* start_notify = nullptr)
-      : counter_(counter), start_notify_(start_notify) {}
+  TestTask(std::atomic<int>* counter, absl::Notification* start_notify = nullptr,
+           absl::Notification* done_notify = nullptr)
+      : counter_(counter), start_notify_(start_notify), done_notify_(done_notify) {}
 
   void StartExecution() override {
     if (start_notify_) start_notify_->WaitForNotification();
@@ -37,12 +38,13 @@ class TestTask : public WorkerTask {
   }
 
   void PumpWrites() override {
-    // No-op for testing
+    if (done_notify_) done_notify_->Notify();
   }
 
  private:
   std::atomic<int>* counter_;
   absl::Notification* start_notify_;
+  absl::Notification* done_notify_;
 };
 
 TEST(WarmWorkerPoolTest, BasicAcquireAndRelease) {
@@ -51,19 +53,14 @@ TEST(WarmWorkerPoolTest, BasicAcquireAndRelease) {
   pool.Start();
 
   std::atomic<int> counter{0};
-  auto task = std::make_shared<TestTask>(&counter);
+  absl::Notification done;
+  auto task = std::make_shared<TestTask>(&counter, nullptr, &done);
 
   ASSERT_TRUE(pool.AcquireWorker(task).ok());
 
-  // Wait for worker to finish (counter reaches 1)
-  auto start_time = std::chrono::steady_clock::now();
-  while (counter.load() < 1) {
-    auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count() > 5) {
-      FAIL() << "Timeout waiting for task to start execution";
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  // Wait for worker to fully finish task execution and notification.
+  done.WaitForNotification();
+  EXPECT_EQ(counter.load(), 1);
 
   pool.ReleaseTask(task.get());
   pool.Shutdown();

@@ -16,7 +16,7 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/substitute.h"
-#include "src/engine/warm_worker_pool.h"
+#include "src/engine/dynamic_worker_coordinator.h"
 
 namespace dcodex {
 
@@ -42,7 +42,7 @@ ReactorInternalState::ReactorInternalState(const CodeRequest* req, std::atomic<i
     : request(req), counter(c), reactor(r), state(ReactorState::kIdle) {}
 
 ExecuteReactor::ExecuteReactor(const CodeRequest* request, std::atomic<int>& counter,
-                               WarmWorkerPool* pool,
+                               DynamicWorkerCoordinator* pool,
                                std::shared_ptr<SandboxedProcess> executor)
     : shared_state_(std::make_shared<ReactorInternalState>(request, counter, this)),
       pool_(pool),
@@ -176,7 +176,7 @@ void ExecuteReactor::OnDone() {
   shared_state_->notify_cv.SignalAll();
   shared_state_->counter.fetch_sub(1);
   if (pool_ != nullptr) {
-    pool_->ReleaseTask(this);
+    pool_->ReleaseWorker(this);
   }
 }
 
