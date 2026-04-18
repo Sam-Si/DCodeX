@@ -8,6 +8,7 @@ cc_library(
     deps = [
         "//src/engine:sandbox",
         "//src/engine:warm_worker_pool",
+        "//src/engine:dynamic_worker_coordinator",
         "//proto:sandbox_cc_grpc",
         "@com_github_grpc_grpc//:grpc++_unsecure",
         "@com_google_absl//absl/log",
@@ -40,6 +41,7 @@ cc_library(
     deps = [
         ":execute_reactor",
         "//src/engine:warm_worker_pool",
+        "//src/engine:dynamic_worker_coordinator",
         "//proto:sandbox_cc_grpc",
         "@com_github_grpc_grpc//:grpc++_unsecure",
         "@com_google_absl//absl/base:core_headers",
