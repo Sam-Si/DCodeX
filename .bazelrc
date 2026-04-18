@@ -36,6 +36,10 @@ build --per_file_copt=^src/.*@-Wall
 build --per_file_copt=^src/.*@-Wextra
 build --per_file_copt=^src/.*@-Werror
 build --strip=never
+build --jobs=20
+build --local_resources=cpu=16
+build --local_resources=memory=57344
+build --linkopt=-Wl,--threads=16
 
 # ------------------------------------------------------------
 # 5. SANDBOXING (Strict isolation for accuracy)
@@ -60,17 +64,10 @@ build --disk_cache=.bazel/disk_cache
 # Handled automatically via --enable_platform_specific_config
 # which maps build:linux and build:macos based on the host OS.
 
-# ------------------------------------------------------------
-# 8. LINUX COMPILER TOOLCHAIN & RESOURCES
-# ------------------------------------------------------------
 build:linux --repo_env=CC=clang
 build:linux --repo_env=CXX=clang++
 build:linux --linkopt=-fuse-ld=lld
-build:linux --jobs=20
-build:linux --local_resources=cpu=16
-build:linux --local_resources=memory=57344
 build:linux --worker_max_instances=16
-build:linux --linkopt=-Wl,--threads=16
 
 # ------------------------------------------------------------
 # 9. SANITIZER CONFIGURATIONS (TSAN, MSAN, ASAN)
@@ -133,12 +130,9 @@ build:asan --copt=-DADDRESS_SANITIZER
 test:asan --action_env=ASAN_OPTIONS="check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
 test:asan --action_env=UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
 
-# Platform-specific ASan overrides
-test:asan_linux --config=asan
-test:asan_linux --action_env=ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
-
-test:asan_macos --config=asan
-test:asan_macos --action_env=ASAN_OPTIONS="detect_leaks=0:check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
+# Platform-specific ASan overrides (Auto-selected via --enable_platform_specific_config)
+test:asan:linux --action_env=ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
+test:asan:macos --action_env=ASAN_OPTIONS="detect_leaks=0:check_initialization_order=1:strict_init_order=1:halt_on_error=1:detect_stack_use_after_return=1:detect_odr_violation=2"
 
 # ------------------------------------------------------------
 # 10. MACOS CONFIGURATION (M1 / M-Series)

@@ -22,6 +22,29 @@ pip install -r python_client/requirements.txt
 python python_client/main.py --file examples/cpp/03_fibonacci.cpp
 ```
 
+## 🚀 Performance & Platform Optimization
+
+DCodeX is optimized for maximum build and test speed out of the box.
+
+### Default: High-Performance Linux
+By default, DCodeX assumes a high-performance Linux environment and optimizes for speed:
+- **Parallelism**: Defaults to `--jobs 20` and `--linkopt=-Wl,--threads=16`.
+- **Resources**: Pre-allocates 16 CPUs and 56GB RAM for the build/test execution.
+- **Fast Linking**: Uses `lld` (the LLVM linker) on Linux for near-instant link times.
+
+### macOS (M1/M2/M3)
+On macOS, DCodeX automatically detects the Silicon architecture and tunes itself:
+- **Optimization**: Uses `--cpu=darwin_arm64` and `--macos_cpus=arm64`.
+- **Resource Guardrails**: Throttles to 8 CPUs and 16GB RAM to maintain UI responsiveness while building.
+
+```bash
+# Explicitly use the high-performance Linux config (if not auto-detected)
+bazel build --config=linux //src/api:server
+
+# Explicitly use the macOS Silicon config
+bazel build --config=macos //src/api:server
+```
+
 ## 🏗️ Core Architecture: Dynamic Worker Coordinator
 
 DCodeX features a sophisticated **Dynamic Worker Coordinator** that replaces static pools with a reactive, language-aware concurrency model.
@@ -87,14 +110,16 @@ DCodeX is built with a focus on concurrency safety and memory stability.
 
 ### Sanitizer Suite
 
-We use industry-standard sanitizers to ensure a race-free and leak-free codebase:
+DCodeX uses platform-aware sanitizers to ensure a race-free and leak-free codebase. The configuration automatically handles platform differences (e.g., disabling leak detection on macOS where it is unsupported).
 
 ```bash
-# Run tests with ThreadSanitizer (TSan) to detect data races
-bazel test --config=tsan //src/engine:dynamic_worker_coordinator_test
+# Run tests with ThreadSanitizer (TSan) - detects races and deadlocks
+# Runs each test 20 times to shake out non-deterministic concurrency bugs.
+bazel test --config=tsan //...
 
-# Run tests with AddressSanitizer (ASan) for memory safety
-bazel test --config=asan //src/engine:dynamic_worker_coordinator_test
+# Run tests with AddressSanitizer (ASan) - detects memory leaks and corruption
+# Automatically selects 'asan:linux' or 'asan:macos' based on your host.
+bazel test --config=asan //...
 ```
 
 ### Best Practices
