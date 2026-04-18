@@ -35,6 +35,10 @@ build --copt=-g3
 build --per_file_copt=^src/.*@-Wall
 build --per_file_copt=^src/.*@-Wextra
 build --per_file_copt=^src/.*@-Werror
+build --per_file_copt=^src/.*@-Wthread-safety
+build --per_file_copt=^src/.*@-Wshadow
+build --per_file_copt=^src/.*@-Wconversion
+build --per_file_copt=^src/.*@-fcolor-diagnostics
 build --strip=never
 build --jobs=20
 build --local_resources=cpu=16
@@ -44,6 +48,7 @@ build --linkopt=-Wl,--threads=16
 # Linux Sandbox Hardening: Fixes "File exists" and "/dev/null" errors
 build:linux --sandbox_tmpfs_path=/tmp
 build:linux --sandbox_add_mount_pair=/dev/null
+build:linux --test_tmpdir=/tmp/bazel-test-logs
 
 # ------------------------------------------------------------
 # 5. SANDBOXING (Strict isolation for accuracy)
@@ -72,6 +77,17 @@ build:linux --repo_env=CC=clang
 build:linux --repo_env=CXX=clang++
 build:linux --linkopt=-fuse-ld=lld
 build:linux --worker_max_instances=16
+
+# ------------------------------------------------------------
+# 8. AUDIT MODE (Maximum Correctness Audit)
+# Usage: bazel build --config=audit //...
+# ------------------------------------------------------------
+build:audit --compilation_mode=dbg
+build:audit --copt=-g3
+build:audit --copt=-Wthread-safety
+build:audit --copt=-Wshadow
+build:audit --copt=-Werror
+build:audit --features=parse_headers
 
 # ------------------------------------------------------------
 # 9. SANITIZER CONFIGURATIONS (TSAN, MSAN, ASAN)

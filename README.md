@@ -104,29 +104,43 @@ DCodeX/
 └── python_client/            # Reference Client Implementation
 ```
 
-## 🧪 Testing & Reliability
+## 🛡️ Correctness & Reliability First
 
-DCodeX is built with a focus on concurrency safety and memory stability.
+DCodeX prioritizes architectural correctness over raw speed. We use a multi-layered verification strategy to ensure the system is production-ready.
 
-### Sanitizer Suite
-
-DCodeX uses platform-aware sanitizers to ensure a race-free and leak-free codebase. The configuration automatically handles platform differences (e.g., disabling leak detection on macOS where it is unsupported).
+### 1. Static Analysis (Audit Mode)
+We use Clang's **Thread Safety Analysis** and strict compiler warnings to catch bugs at compile-time. Our `audit` configuration enforces:
+- `ABSL_GUARDED_BY` annotations on all shared state.
+- Zero-tolerance for shadowed variables or unsafe type conversions.
+- Header parsing verification to ensure clean dependency graphs.
 
 ```bash
-# Run tests with ThreadSanitizer (TSan) - detects races and deadlocks
-# Runs each test 20 times to shake out non-deterministic concurrency bugs.
+# Run a full correctness audit
+bazel build --config=audit //...
+```
+
+### 2. Dynamic Verification (Sanitizers)
+We use platform-aware sanitizers to catch runtime edge cases that static analysis might miss:
+
+```bash
+# Detect data races & deadlocks (Runs tests 20x)
 bazel test --config=tsan //...
 
-# Run tests with AddressSanitizer (ASan) - detects memory leaks and corruption
-# Automatically selects 'asan:linux' or 'asan:macos' based on your host.
+# Detect memory corruption & leaks
 bazel test --config=asan //...
 ```
 
-### Best Practices
+### 3. Production Hardening Checklist
+Before any major release, we verify:
+- [x] **Race-Free State Transitions**: Verified via TSan stress tests.
+- [x] **RAII Resource Lifecycle**: No PID leaks or zombie processes after cancellation.
+- [x] **Sandbox Hermeticity**: Resource limits (CPU/MEM) are strictly enforced.
+- [x] **Lock Hierarchy**: Documented in `dynamic_worker_coordinator.cpp` to prevent AB-BA deadlocks.
 
-- **Abseil Integration**: Uses `absl::Mutex` and `absl::CondVar` for robust synchronization.
-- **RAII Everything**: Resource acquisition is initialization for processes, files, and threads.
-- **Lock Ordering**: Strict lock hierarchy to prevent deadlocks in the balancer and worker loops.
+### Best Practices
+- **Abseil Synchronization**: Prefer `absl::Mutex` over `std::mutex` for better deadlock detection and thread-safety annotations.
+- **Static Linking**: All tests use `linkstatic = True` to ensure stable, hermetic execution in sandboxed environments.
+- **Hermetic Build Env**: Uses `--incompatible_strict_action_env` to prevent host environment leakage.
 
 ## 📜 License
 
