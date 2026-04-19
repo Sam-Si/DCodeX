@@ -43,7 +43,6 @@ build --strip=never
 build --jobs=20
 build --local_resources=cpu=16
 build --local_resources=memory=57344
-build --linkopt=-Wl,--threads=16
 
 # Linux Sandbox Hardening: Fixes "File exists" and "/dev/null" errors
 build:linux --sandbox_tmpfs_path=/tmp
@@ -52,6 +51,7 @@ build:linux --test_tmpdir=/tmp/bazel-test-logs
 build:linux --dynamic_mode=off
 build:linux --experimental_sandbox_async_tree_delete
 build:linux --sandbox_graceful_shutdown
+build:linux --linkopt=-Wl,--threads=16
 
 # ------------------------------------------------------------
 # 5. SANDBOXING (Strict isolation for accuracy)
@@ -117,7 +117,7 @@ build:tsan --config=sanitizer_common
 build:tsan --copt=-fsanitize=thread
 build:tsan --linkopt=-fsanitize=thread
 build:tsan --copt=-DTHREAD_SANITIZER
-test:tsan --action_env=TSAN_OPTIONS="history_size=7:halt_on_error=1:detect_deadlocks=1:second_deadlock_stack=1:strict_memcmp=1:report_atomic_races=1:force_seq_cst_atomics=1"
+test:tsan --action_env=TSAN_OPTIONS="history_size=7:halt_on_error=1:detect_deadlocks=1:second_deadlock_stack=1:strict_memcmp=1:report_atomic_races=1:force_seq_cst_atomics=1:exitcode=66:symbolize=1:print_suppressions=1"
 test:tsan --runs_per_test=20
 test:tsan --local_test_jobs=10
 
