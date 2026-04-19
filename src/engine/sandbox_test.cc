@@ -75,7 +75,7 @@ TEST(SandboxTest, HelloWorldCpp) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -101,7 +101,7 @@ TEST(SandboxTest, HelloWorldPython) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -125,7 +125,7 @@ TEST(SandboxTest, HelloWorldC) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -152,7 +152,7 @@ TEST(SandboxTest, StdinPassthrough) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -186,7 +186,7 @@ TEST(SandboxTest, CompilationError) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -211,7 +211,7 @@ TEST(SandboxTest, WallClockTimeoutTriggered) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 30);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 1);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -241,7 +241,7 @@ TEST(SandboxTest, OutputTruncation) {
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
   // Very small output cap: 1 KB.
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -275,7 +275,7 @@ TEST(SandboxTest, CacheHitOnSecondRun) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
 
@@ -313,7 +313,7 @@ TEST(SandboxTest, NonZeroExitCode) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -345,7 +345,7 @@ TEST(SandboxTest, StderrCapture) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
 
@@ -385,7 +385,7 @@ TEST(SandboxTest, EmptyProgramFailsCleanly) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -407,7 +407,7 @@ TEST(SandboxTest, SegfaultProducesSignalError) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -450,7 +450,7 @@ TEST(SandboxTest, Linux_CpuTimeLimitEnforced) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 1);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 60);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -487,7 +487,7 @@ TEST(SandboxTest, Linux_MemoryLimitEnforced) {
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 15);
   // 32 MB address-space limit — any large allocation will fail.
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 32ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;
@@ -519,7 +519,7 @@ TEST(SandboxTest, Linux_ResourceStatsPopulated) {
   absl::SetFlag(&FLAGS_sandbox_cpu_time_limit_seconds, 5);
   absl::SetFlag(&FLAGS_sandbox_wall_clock_timeout_seconds, 10);
   absl::SetFlag(&FLAGS_sandbox_memory_limit_bytes, 256ULL * 1024 * 1024);
-  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64 * 1024);
+  absl::SetFlag(&FLAGS_sandbox_max_output_bytes, 64ULL * 1024ULL);
 
   auto sandbox = MakeSandbox();
   OutputCapture cap;

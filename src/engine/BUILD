@@ -216,6 +216,16 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "tsan_canary_test",
+    srcs = ["tsan_canary_test.cc"],
+    copts = ["-std=c++23"],
+    deps = [
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 test_suite(
     name = "concurrency_tests",
     tests = [
