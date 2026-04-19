@@ -17,3 +17,9 @@ build --jobs=4
 # Ensure full output in CI logs
 test --test_output=all
 build --verbose_failures
+
+# 4. SANITIZER HARDENING
+# Use suppressions to ignore system library false positives
+test:msan --action_env=MSAN_OPTIONS="halt_on_error=1:exitcode=77:suppressions=.github/workflows/msan_suppressions.txt"
+# Recommended for LLVM 19+
+build:msan --copt=-fsanitize-memory-param-retval
