@@ -4,6 +4,30 @@ package dcodex;
 
 service CodeExecutor {
   rpc Execute(CodeRequest) returns (stream ExecutionLog);
+  rpc GetSystemMetrics(EmptyRequest) returns (SystemMetrics);
+}
+
+message EmptyRequest {}
+
+message SystemMetrics {
+  // Pool status
+  int32 active_workers = 1;
+  int32 idle_workers = 2;
+  int32 recycling_workers = 3;
+  int32 current_pool_size = 4;
+  
+  // Throughput & Latency
+  int64 total_requests_served = 5;
+  double p50_latency_ms = 6;
+  double p99_latency_ms = 7;
+  
+  // Cache efficiency
+  int64 cache_hits = 8;
+  int64 cache_misses = 9;
+  
+  // Resource usage
+  int64 peak_memory_usage_bytes = 10;
+  double cpu_load_average = 11;
 }
 
 message CodeRequest {

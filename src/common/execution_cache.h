@@ -67,8 +67,15 @@ class CacheInterface {
   // Clears entire cache.
   virtual void Clear() = 0;
 
+  // Cache statistics.
+  struct CacheStats {
+    size_t size;
+    int64_t hits;
+    int64_t misses;
+  };
+
   // Gets cache statistics.
-  [[nodiscard]] virtual size_t Size() const = 0;
+  [[nodiscard]] virtual CacheStats GetStats() const = 0;
 };
 
 // Thread-safe LRU cache with TTL support for code execution results.
@@ -93,7 +100,7 @@ class ExecutionCache : public CacheInterface {
   void Clear() override;
 
   // Gets cache statistics.
-  [[nodiscard]] size_t Size() const override;
+  [[nodiscard]] CacheStats GetStats() const override;
 
  private:
   // LRU list type: stores hash keys. Front = most recently used.
@@ -111,6 +118,8 @@ class ExecutionCache : public CacheInterface {
   LruList lru_list_ ABSL_GUARDED_BY(mutex_);
   const absl::Duration ttl_;
   const size_t max_entries_;
+  mutable int64_t hits_ ABSL_GUARDED_BY(mutex_) = 0;
+  mutable int64_t misses_ ABSL_GUARDED_BY(mutex_) = 0;
 
   void EvictIfNeeded() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   [[nodiscard]] bool IsExpired(const CachedResult& result) const;

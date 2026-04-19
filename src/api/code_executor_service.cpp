@@ -97,4 +97,33 @@ grpc::ServerWriteReactor<ExecutionLog>* CodeExecutorServiceImpl::Execute(
   return reactor.get();
 }
 
+grpc::ServerUnaryReactor* CodeExecutorServiceImpl::GetSystemMetrics(
+    grpc::CallbackServerContext* context, const EmptyRequest* request,
+    SystemMetrics* response) {
+  auto* reactor = context->DefaultReactor();
+
+  // Aggregate metrics from the pool and the executor.
+  auto pool_m = worker_pool_.GetMetrics();
+  auto exec_m = executor_->GetMetrics();
+
+  response->set_active_workers(pool_m.active_workers);
+  response->set_idle_workers(pool_m.idle_workers);
+  response->set_recycling_workers(pool_m.recycling_workers);
+  response->set_current_pool_size(pool_m.current_pool_size);
+
+  response->set_total_requests_served(pool_m.total_requests_served);
+  response->set_p50_latency_ms(pool_m.p50_latency_ms);
+  response->set_p99_latency_ms(pool_m.p99_latency_ms);
+
+  response->set_cache_hits(static_cast<int64_t>(exec_m.cache_stats.hits));
+  response->set_cache_misses(static_cast<int64_t>(exec_m.cache_stats.misses));
+
+  // Placeholder for hardware-level metrics if needed in future.
+  response->set_peak_memory_usage_bytes(0);
+  response->set_cpu_load_average(0.0);
+
+  reactor->Finish(grpc::Status::OK);
+  return reactor;
+}
+
 }  // namespace dcodex

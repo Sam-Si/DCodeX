@@ -42,6 +42,12 @@ class SandboxedProcess {
       absl::string_view filename_or_extension, absl::string_view code,
       absl::string_view stdin_data, OutputCallback callback);
 
+  // Real-time metrics from the sandbox and its cache.
+  struct Metrics {
+    ExecutionCache::CacheStats cache_stats;
+  };
+  Metrics GetMetrics() const;
+
  private:
   std::shared_ptr<CacheInterface> cache_;
 };

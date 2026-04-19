@@ -39,6 +39,10 @@ class CodeExecutorServiceImpl final : public CodeExecutor::CallbackService {
   grpc::ServerWriteReactor<ExecutionLog>* Execute(
       grpc::CallbackServerContext* context, const CodeRequest* request) override;
 
+  grpc::ServerUnaryReactor* GetSystemMetrics(
+      grpc::CallbackServerContext* context, const EmptyRequest* request,
+      SystemMetrics* response) override;
+
   void TrackRejectReactor(const std::shared_ptr<RejectReactor>& reactor);
   void ReleaseRejectReactor(const RejectReactor* reactor);
 

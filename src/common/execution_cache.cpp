@@ -62,13 +62,17 @@ std::shared_ptr<const CachedResult> ExecutionCache::Get(
 
   const auto it = cache_.find(code_hash);
   if (it == cache_.end()) {
+    misses_++;
     return nullptr;
   }
 
   // Check if expired.
   if (IsEntryExpired(*it->second.result, ttl_)) {
+    misses_++;
     return nullptr;
   }
+
+  hits_++;
 
   // Promote to front of LRU list (most recently used) using splice for O(1).
   lru_list_.splice(lru_list_.begin(), lru_list_, it->second.lru_iterator);
@@ -125,9 +129,9 @@ void ExecutionCache::Clear() {
   lru_list_.clear();
 }
 
-size_t ExecutionCache::Size() const {
+ExecutionCache::CacheStats ExecutionCache::GetStats() const {
   absl::MutexLock lock(&mutex_);
-  return cache_.size();
+  return {cache_.size(), hits_, misses_};
 }
 
 void ExecutionCache::EvictIfNeeded() {
