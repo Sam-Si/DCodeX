@@ -173,6 +173,7 @@ cc_test(
     srcs = ["warm_worker_pool_test.cc"],
     copts = ["-std=c++23"],
     linkstatic = True,
+    linkopts = ["-pthread"],
     deps = [
         ":warm_worker_pool",
         "@com_google_absl//absl/synchronization",
@@ -186,6 +187,7 @@ cc_test(
     srcs = ["dynamic_worker_coordinator_test.cc"],
     copts = ["-std=c++23"],
     linkstatic = True,
+    linkopts = ["-pthread"],
     deps = [
         ":dynamic_worker_coordinator",
         "@com_google_absl//absl/synchronization",
@@ -203,6 +205,7 @@ cc_test(
     # --test_timeout=120 covers CPU-burn tests that run for ~5 seconds each.
     timeout = "moderate",
     linkstatic = True,
+    linkopts = ["-pthread"],
     deps = [
         ":sandbox",
         ":dynamic_worker_coordinator",
@@ -217,9 +220,12 @@ cc_test(
 )
 
 cc_test(
-    name = "tsan_canary_test",
+    name = "tsan_checker",
     srcs = ["tsan_canary_test.cc"],
     copts = ["-std=c++23"],
+    linkstatic = True,
+    linkopts = ["-pthread"],
+    tags = ["no-sandbox", "exclusive"],
     deps = [
         "@googletest//:gtest",
         "@googletest//:gtest_main",

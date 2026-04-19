@@ -226,7 +226,7 @@ DynamicWorkerCoordinator::Metrics DynamicWorkerCoordinator::GetMetrics() {
       std::vector<double> sorted = latency_history_ms_;
       std::sort(sorted.begin(), sorted.end());
       m.p50_latency_ms = sorted[sorted.size() / 2];
-      m.p99_latency_ms = sorted[static_cast<size_t>(sorted.size() * 0.99)];
+      m.p99_latency_ms = sorted[static_cast<size_t>(static_cast<double>(sorted.size()) * 0.99)];
     }
   }
   return m;
