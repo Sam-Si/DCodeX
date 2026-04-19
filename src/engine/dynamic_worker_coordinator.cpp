@@ -178,11 +178,22 @@ absl::StatusOr<WorkerTask*> DynamicWorkerCoordinator::LeaseWorker(
     done.WaitForNotification();
   }
 
-  // Track wait latency for the PoolBalancer's scaling heuristic.
+  // Track wait latency for the PoolBalancer's scaling heuristic and system metrics.
   absl::Duration wait_time = absl::Now() - start_time;
+  double wait_time_ms = absl::ToDoubleMilliseconds(wait_time);
+
   total_wait_time_us_.fetch_add(absl::ToInt64Microseconds(wait_time),
                                 std::memory_order_relaxed);
   completed_requests_.fetch_add(1, std::memory_order_relaxed);
+
+  {
+    absl::MutexLock lock(&stats_mutex_);
+    latency_history_ms_.push_back(wait_time_ms);
+    // Keep only the last 10,000 requests for percentile calculation.
+    if (latency_history_ms_.size() > 10000) {
+      latency_history_ms_.erase(latency_history_ms_.begin());
+    }
+  }
 
   if (!req->result.ok()) return req->result;
   return req->task.get();
@@ -191,6 +202,34 @@ absl::StatusOr<WorkerTask*> DynamicWorkerCoordinator::LeaseWorker(
 void DynamicWorkerCoordinator::ReleaseWorker(WorkerTask* task) {
   absl::MutexLock lock(&mutex_);
   active_leases_.erase(task);
+}
+
+DynamicWorkerCoordinator::Metrics DynamicWorkerCoordinator::GetMetrics() {
+  Metrics m = {};
+  {
+    absl::MutexLock lock(&mutex_);
+    m.current_pool_size = static_cast<int>(workers_.size());
+    for (const auto& w : workers_) {
+      switch (w->state()) {
+        case WorkerState::kIdle: m.idle_workers++; break;
+        case WorkerState::kBusy: m.active_workers++; break;
+        case WorkerState::kRecycling: m.recycling_workers++; break;
+        default: break;
+      }
+    }
+  }
+
+  {
+    absl::MutexLock lock(&stats_mutex_);
+    m.total_requests_served = static_cast<int64_t>(latency_history_ms_.size());
+    if (!latency_history_ms_.empty()) {
+      std::vector<double> sorted = latency_history_ms_;
+      std::sort(sorted.begin(), sorted.end());
+      m.p50_latency_ms = sorted[sorted.size() / 2];
+      m.p99_latency_ms = sorted[static_cast<size_t>(sorted.size() * 0.99)];
+    }
+  }
+  return m;
 }
 
 void DynamicWorkerCoordinator::PoolBalancerLoop() {

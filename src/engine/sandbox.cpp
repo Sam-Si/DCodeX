@@ -626,4 +626,8 @@ absl::StatusOr<ExecutionResult> SandboxedProcess::CompileAndRunStreaming(
   return result;
 }
 
+SandboxedProcess::Metrics SandboxedProcess::GetMetrics() const {
+  return {cache_->GetStats()};
+}
+
 }  // namespace dcodex

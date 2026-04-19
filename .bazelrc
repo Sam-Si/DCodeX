@@ -87,6 +87,8 @@ build:audit --compilation_mode=dbg
 build:audit --copt=-g3
 build:audit --copt=-Wthread-safety
 build:audit --copt=-Wshadow
+build:audit --copt=-Wconversion
+build:audit --copt=-Wsign-conversion
 build:audit --copt=-Werror
 build:audit --features=parse_headers
 
@@ -118,6 +120,11 @@ build:tsan --copt=-DTHREAD_SANITIZER
 test:tsan --action_env=TSAN_OPTIONS="history_size=7:halt_on_error=1:detect_deadlocks=1:second_deadlock_stack=1:strict_memcmp=1:report_atomic_races=1:force_seq_cst_atomics=1:exitcode=66:symbolize=1:print_suppressions=1"
 test:tsan --runs_per_test=20
 test:tsan --local_test_jobs=10
+
+# -- Code Coverage --
+build:coverage --collect_code_coverage
+build:coverage --instrumentation_filter=^//src/.*
+build:coverage --combined_report=lcov
 
 # -- MSan: MemorySanitizer --
 # Usage: bazel test --config=msan //...

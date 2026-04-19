@@ -105,6 +105,18 @@ class DynamicWorkerCoordinator {
 
   // Releases the worker associated with the given task back to the pool.
   void ReleaseWorker(WorkerTask* task);
+  
+  // Real-time system metrics.
+  struct Metrics {
+    int active_workers;
+    int idle_workers;
+    int recycling_workers;
+    int current_pool_size;
+    int64_t total_requests_served;
+    double p50_latency_ms;
+    double p99_latency_ms;
+  };
+  Metrics GetMetrics();
 
  private:
   enum class WorkerState {
@@ -156,6 +168,9 @@ class DynamicWorkerCoordinator {
 
   std::atomic<int64_t> total_wait_time_us_{0};
   std::atomic<int64_t> completed_requests_{0};
+  
+  mutable absl::Mutex stats_mutex_;
+  std::vector<double> latency_history_ms_ ABSL_GUARDED_BY(stats_mutex_);
 
   std::atomic<bool> shutting_down_{false};
   absl::CondVar cv_; // For interruptible sleep in balancer.
