@@ -1,0 +1,92 @@
+name: Linux CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up LLVM 19
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg ca-certificates
+        sudo mkdir -p /usr/share/keyrings
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+        sudo apt-get update
+        sudo apt-get install -y clang-19 lld-19 libclang-rt-19-dev
+        sudo ln -sf /usr/bin/clang-19 /usr/bin/clang
+        sudo ln -sf /usr/bin/clang++-19 /usr/bin/clang++
+        sudo ln -sf /usr/bin/lld-19 /usr/bin/lld
+
+    - name: Install grpcurl
+      run: |
+        curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.3/grpcurl_1.9.3_linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin grpcurl
+        sudo chmod +x /usr/local/bin/grpcurl
+
+    - name: Cache Bazel
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/bazel
+        key: ${{ runner.os }}-bazel-${{ hashFiles('**/MODULE.bazel', '**/WORKSPACE', '**/WORKSPACE.bazel') }}
+        restore-keys: |
+          ${{ runner.os }}-bazel-
+
+    - name: Bazel Build
+      run: |
+        bazel build //... \
+          --jobs=4 \
+          --local_resources=cpu=2,memory=4096 \
+          --host_jvm_args=-Xmx2g \
+          --verbose_failures
+
+    - name: Bazel Test (Standard)
+      run: |
+        bazel test //... \
+          --jobs=4 \
+          --local_resources=cpu=2,memory=4096 \
+          --host_jvm_args=-Xmx2g \
+          --test_output=all \
+          --verbose_failures
+
+    - name: Bazel Test (TSan)
+      run: |
+        bazel test --config=tsan //... \
+          --jobs=2 \
+          --local_resources=cpu=2,memory=4096 \
+          --host_jvm_args=-Xmx2g \
+          --test_output=all \
+          --verbose_failures
+
+    - name: Bazel Test (ASan)
+      run: |
+        bazel test --config=asan //... \
+          --jobs=2 \
+          --local_resources=cpu=2,memory=4096 \
+          --host_jvm_args=-Xmx2g \
+          --test_output=all \
+          --verbose_failures
+
+    - name: Bazel Test (MSan)
+      run: |
+        bazel test --config=msan //... \
+          --jobs=2 \
+          --local_resources=cpu=2,memory=4096 \
+          --host_jvm_args=-Xmx2g \
+          --test_output=all \
+          --verbose_failures
+
+    - name: Upload Test Logs on Failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: bazel-test-logs
+        path: bazel-testlogs/

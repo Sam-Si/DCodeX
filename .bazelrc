@@ -58,10 +58,10 @@ build:linux --linkopt=-Wl,--threads=16
 #   --security-opt seccomp=unconfined on the container.
 #   If that is not possible, fall back to --spawn_strategy=local.
 # ------------------------------------------------------------
-build --spawn_strategy=sandboxed
-build --strategy=CppCompile=sandboxed
-build --strategy=CppLink=sandboxed
-build --genrule_strategy=sandboxed
+build --spawn_strategy=sandboxed,standalone
+build --strategy=CppCompile=sandboxed,standalone
+build --strategy=CppLink=sandboxed,standalone
+build --genrule_strategy=sandboxed,standalone
 
 # ------------------------------------------------------------
 # 6. CACHING 

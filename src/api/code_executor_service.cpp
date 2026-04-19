@@ -98,7 +98,7 @@ grpc::ServerWriteReactor<ExecutionLog>* CodeExecutorServiceImpl::Execute(
 }
 
 grpc::ServerUnaryReactor* CodeExecutorServiceImpl::GetSystemMetrics(
-    grpc::CallbackServerContext* context, const EmptyRequest* request,
+    grpc::CallbackServerContext* context, const EmptyRequest* /*request*/,
     SystemMetrics* response) {
   auto* reactor = context->DefaultReactor();
 
