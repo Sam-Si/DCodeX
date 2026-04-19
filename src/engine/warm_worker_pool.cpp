@@ -26,9 +26,9 @@ void WarmWorkerPool::Start() {
   if (!workers_.empty()) {
     return;
   }
-  const int worker_count = max_workers_ > 0 ? max_workers_ : 1;
+  const size_t worker_count = max_workers_ > 0 ? static_cast<size_t>(max_workers_) : 1;
   workers_.reserve(worker_count);
-  for (int i = 0; i < worker_count; ++i) {
+  for (size_t i = 0; i < worker_count; ++i) {
     workers_.push_back(std::make_unique<Worker>(this));
     idle_workers_++;
   }
