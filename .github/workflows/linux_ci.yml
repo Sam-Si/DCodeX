@@ -44,7 +44,8 @@ jobs:
       run: |
         bazel build //... \
           --jobs=4 \
-          --local_resources=cpu=2,memory=4096 \
+          --local_cpu_resources=2 \
+          --local_ram_resources=4096 \
           --host_jvm_args=-Xmx2g \
           --verbose_failures
 
@@ -52,7 +53,8 @@ jobs:
       run: |
         bazel test //... \
           --jobs=4 \
-          --local_resources=cpu=2,memory=4096 \
+          --local_cpu_resources=2 \
+          --local_ram_resources=4096 \
           --host_jvm_args=-Xmx2g \
           --test_output=all \
           --verbose_failures
@@ -61,7 +63,8 @@ jobs:
       run: |
         bazel test --config=tsan //... \
           --jobs=2 \
-          --local_resources=cpu=2,memory=4096 \
+          --local_cpu_resources=2 \
+          --local_ram_resources=4096 \
           --host_jvm_args=-Xmx2g \
           --test_output=all \
           --verbose_failures
@@ -70,7 +73,8 @@ jobs:
       run: |
         bazel test --config=asan //... \
           --jobs=2 \
-          --local_resources=cpu=2,memory=4096 \
+          --local_cpu_resources=2 \
+          --local_ram_resources=4096 \
           --host_jvm_args=-Xmx2g \
           --test_output=all \
           --verbose_failures
@@ -79,7 +83,8 @@ jobs:
       run: |
         bazel test --config=msan //... \
           --jobs=2 \
-          --local_resources=cpu=2,memory=4096 \
+          --local_cpu_resources=2 \
+          --local_ram_resources=4096 \
           --host_jvm_args=-Xmx2g \
           --test_output=all \
           --verbose_failures
