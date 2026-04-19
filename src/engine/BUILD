@@ -232,6 +232,25 @@ cc_test(
     ],
 )
 
+# ── TSan Proof-of-Detection ──────────────────────────────────────────
+# This test contains DELIBERATE data races. It is tagged "manual" so it
+# is excluded from `bazel test //...`. The CI runs it in a special step
+# that EXPECTS TSan to detect the race and exit with code 66. If TSan
+# does NOT detect the race, the CI step fails — proving the sanitizer
+# pipeline is broken.
+cc_test(
+    name = "tsan_proof_test",
+    srcs = ["tsan_proof_test.cc"],
+    copts = ["-std=c++23"],
+    linkstatic = True,
+    linkopts = ["-pthread"],
+    tags = ["manual", "no-sandbox", "exclusive"],
+    deps = [
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 test_suite(
     name = "concurrency_tests",
     tests = [
