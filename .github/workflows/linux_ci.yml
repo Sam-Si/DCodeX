@@ -51,7 +51,8 @@ jobs:
     - name: Bazel Test (TSan)
       run: |
         bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan //... \
-          --jobs=2
+          --jobs=2 \
+          --test_tag_filters=-no-tsan
 
     - name: "🔬 TSan Proof-of-Detection"
       run: |

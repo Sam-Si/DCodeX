@@ -206,6 +206,10 @@ cc_test(
     timeout = "moderate",
     linkstatic = True,
     linkopts = ["-pthread"],
+    # Excluded from TSan runs: this test forks clang++ and compiled binaries.
+    # TSan-instrumenting those child processes causes OOM on CI runners
+    # and provides no concurrency testing value.
+    tags = ["no-tsan"],
     deps = [
         ":sandbox",
         ":dynamic_worker_coordinator",
