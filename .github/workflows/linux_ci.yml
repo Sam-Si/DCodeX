@@ -50,9 +50,18 @@ jobs:
 
     - name: Bazel Test (TSan)
       run: |
-        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan //... \
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
+          //... \
           --jobs=2 \
-          --test_tag_filters=-no-tsan
+          --test_tag_filters=-no-sandbox-tsan
+
+    - name: Bazel Test (TSan - Sandbox, constrained)
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
+          //src/engine:sandbox_test \
+          --jobs=1 \
+          --runs_per_test=1 \
+          --local_test_jobs=1
 
     - name: "🔬 TSan Proof-of-Detection"
       run: |

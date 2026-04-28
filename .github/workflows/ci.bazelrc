@@ -13,10 +13,15 @@ build --local_resources=cpu=2
 build --local_resources=memory=4096
 build --jobs=4
 
-# 3. OBSERVABILITY
-# Ensure full output in CI logs
-test --test_output=all
+# 3. QUIET LOGGING
+# Only print output for FAILED tests (not every passing test)
+test --test_output=errors
 build --verbose_failures
+# Suppress the full option dump on every command
+common --noannounce_rc
+# Collapse progress into summary lines
+build --show_progress_rate_limit=5
+build --curses=no
 
 # 4. SANITIZER HARDENING
 # Use suppressions to ignore system library false positives
