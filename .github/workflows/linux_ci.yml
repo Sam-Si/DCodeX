@@ -74,8 +74,8 @@ jobs:
         bazel --bazelrc=.github/workflows/ci.bazelrc test \
           --config=tsan \
           --runs_per_test=1 \
-          --test_output=errors \
-          //src/engine:tsan_proof_test || EXIT_CODE=$?
+          --test_output=all \
+          //src/engine:tsan_proof_test > /tmp/tsan_proof_output.log 2>&1 || EXIT_CODE=$?
 
         if [ "$EXIT_CODE" -eq 0 ]; then
           echo "::error::❌ CRITICAL: TSan did NOT detect the deliberate data race!"
@@ -83,16 +83,15 @@ jobs:
           exit 1
         fi
 
-        TEST_LOG="bazel-testlogs/src/engine/tsan_proof_test/test.log"
-        if [ -f "$TEST_LOG" ] && grep -q "ThreadSanitizer" "$TEST_LOG"; then
+        if grep -q "ThreadSanitizer" /tmp/tsan_proof_output.log; then
           echo ""
           echo "✅ ThreadSanitizer correctly detected the data race."
           echo "   The sanitizer pipeline is verified and operational."
           echo "   Your codebase is protected against concurrency bugs."
         else
           echo ""
-          echo "::error::Test failed but NOT due to TSan detection. Check logs."
-          cat "$TEST_LOG" || true
+          echo "::error::Test failed but NOT due to TSan detection. Check logs:"
+          cat /tmp/tsan_proof_output.log
           exit 1
         fi
 
