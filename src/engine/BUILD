@@ -206,6 +206,9 @@ cc_test(
     timeout = "moderate",
     linkstatic = True,
     linkopts = ["-pthread"],
+    # Run under TSan separately with constrained resources (see CI workflow).
+    # This test forks clang++ which has high memory overhead under TSan.
+    tags = ["no-sandbox-tsan"],
     deps = [
         ":sandbox",
         ":dynamic_worker_coordinator",
@@ -226,6 +229,25 @@ cc_test(
     linkstatic = True,
     linkopts = ["-pthread"],
     tags = ["no-sandbox", "exclusive"],
+    deps = [
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# ── TSan Proof-of-Detection ──────────────────────────────────────────
+# This test contains DELIBERATE data races. It is tagged "manual" so it
+# is excluded from `bazel test //...`. The CI runs it in a special step
+# that EXPECTS TSan to detect the race and exit with code 66. If TSan
+# does NOT detect the race, the CI step fails — proving the sanitizer
+# pipeline is broken.
+cc_test(
+    name = "tsan_proof_test",
+    srcs = ["tsan_proof_test.cc"],
+    copts = ["-std=c++23"],
+    linkstatic = True,
+    linkopts = ["-pthread"],
+    tags = ["manual", "no-sandbox", "exclusive"],
     deps = [
         "@googletest//:gtest",
         "@googletest//:gtest_main",

@@ -1,0 +1,30 @@
+# ============================================================
+# DCodeX: GitHub Actions CI Specialized Config
+# Optimized for free-tier runners (2 CPUs, 7GB RAM)
+# ============================================================
+
+# 1. MEMORY LIMITS
+# Limit Bazel server heap to 2GB to leave room for Clang/LLD
+startup --host_jvm_args=-Xmx2g
+
+# 2. RESOURCE THROTTLING
+# Limit parallel execution to avoid OOM and CPU contention
+build --local_resources=cpu=2
+build --local_resources=memory=4096
+build --jobs=4
+
+# 3. QUIET LOGGING
+# Only print output for FAILED tests (not every passing test)
+test --test_output=errors
+build --verbose_failures
+# Suppress the full option dump on every command
+common --noannounce_rc
+# Collapse progress into summary lines
+build --show_progress_rate_limit=5
+build --curses=no
+
+# 4. SANITIZER HARDENING
+# Use suppressions to ignore system library false positives
+test:msan --action_env=MSAN_OPTIONS="halt_on_error=1:exitcode=77:suppressions=.github/workflows/msan_suppressions.txt"
+# Recommended for LLVM 19+
+build:msan --copt=-fsanitize-memory-param-retval

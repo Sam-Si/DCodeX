@@ -42,47 +42,68 @@ jobs:
 
     - name: Bazel Build
       run: |
-        bazel build //... \
-          --jobs=4 \
-          --local_resources=cpu=2,memory=4096 \
-          --host_jvm_args=-Xmx2g \
-          --verbose_failures
+        bazel --bazelrc=.github/workflows/ci.bazelrc build //...
 
     - name: Bazel Test (Standard)
       run: |
-        bazel test //... \
-          --jobs=4 \
-          --local_resources=cpu=2,memory=4096 \
-          --host_jvm_args=-Xmx2g \
-          --test_output=all \
-          --verbose_failures
+        bazel --bazelrc=.github/workflows/ci.bazelrc test //...
 
     - name: Bazel Test (TSan)
       run: |
-        bazel test --config=tsan //... \
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
+          //... \
           --jobs=2 \
-          --local_resources=cpu=2,memory=4096 \
-          --host_jvm_args=-Xmx2g \
+          --test_tag_filters=-no-sandbox-tsan
+
+    - name: Bazel Test (TSan - Sandbox, constrained)
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
+          //src/engine:sandbox_test \
+          --jobs=1 \
+          --runs_per_test=1 \
+          --local_test_jobs=1
+
+    - name: "🔬 TSan Proof-of-Detection"
+      run: |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  PROOF: Running deliberately buggy code under TSan."
+        echo "  TSan MUST detect the data race for this step to pass."
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        EXIT_CODE=0
+        bazel --bazelrc=.github/workflows/ci.bazelrc test \
+          --config=tsan \
+          --runs_per_test=1 \
           --test_output=all \
-          --verbose_failures
+          //src/engine:tsan_proof_test > /tmp/tsan_proof_output.log 2>&1 || EXIT_CODE=$?
+
+        if [ "$EXIT_CODE" -eq 0 ]; then
+          echo "::error::❌ CRITICAL: TSan did NOT detect the deliberate data race!"
+          echo "::error::The sanitizer pipeline is BROKEN. Investigate immediately."
+          exit 1
+        fi
+
+        if grep -q "ThreadSanitizer" /tmp/tsan_proof_output.log; then
+          echo ""
+          echo "✅ ThreadSanitizer correctly detected the data race."
+          echo "   The sanitizer pipeline is verified and operational."
+          echo "   Your codebase is protected against concurrency bugs."
+        else
+          echo ""
+          echo "::error::Test failed but NOT due to TSan detection. Check logs:"
+          cat /tmp/tsan_proof_output.log
+          exit 1
+        fi
 
     - name: Bazel Test (ASan)
       run: |
-        bazel test --config=asan //... \
-          --jobs=2 \
-          --local_resources=cpu=2,memory=4096 \
-          --host_jvm_args=-Xmx2g \
-          --test_output=all \
-          --verbose_failures
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=asan //... \
+          --jobs=2
 
     - name: Bazel Test (MSan)
       run: |
-        bazel test --config=msan //... \
-          --jobs=2 \
-          --local_resources=cpu=2,memory=4096 \
-          --host_jvm_args=-Xmx2g \
-          --test_output=all \
-          --verbose_failures
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=msan //... \
+          --jobs=2
 
     - name: Upload Test Logs on Failure
       if: failure()
