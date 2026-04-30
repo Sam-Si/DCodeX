@@ -35,18 +35,32 @@ void WarmWorkerPool::Start() {
 }
 
 void WarmWorkerPool::Shutdown() {
-  if (shutting_down_.exchange(true)) {
+  if (shutting_down_.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
-  // No need to lock mutex_ just to notify workers, 
-  // as the workers_ vector is constant after Start().
-  for (const auto& worker : workers_) {
+
+  // Collect raw worker pointers under the lock so we don't race with
+  // AcquireWorker() which iterates workers_ under the same mutex.
+  std::vector<Worker*> workers_to_stop;
+  {
+    absl::MutexLock lock(&mutex_);
+    workers_to_stop.reserve(workers_.size());
+    for (const auto& worker : workers_) {
+      workers_to_stop.push_back(worker.get());
+    }
+  }
+
+  // Signal all workers to stop (outside the pool lock to avoid deadlock
+  // with workers that might re-acquire the pool mutex during their loop).
+  for (auto* worker : workers_to_stop) {
     worker->Notify();
   }
-  // Wait for all workers to finish.
-  for (const auto& worker : workers_) {
+  // Wait for all worker threads to finish.
+  for (auto* worker : workers_to_stop) {
     worker->Join();
   }
+
+  // Now safe to clear — no worker threads are running.
   {
     absl::MutexLock lock(&mutex_);
     active_tasks_.clear();
@@ -55,18 +69,18 @@ void WarmWorkerPool::Shutdown() {
 }
 
 absl::Status WarmWorkerPool::AcquireWorker(std::shared_ptr<WorkerTask> task) {
-  if (shutting_down_.load(std::memory_order_relaxed)) {
+  if (shutting_down_.load(std::memory_order_acquire)) {
     return absl::FailedPreconditionError("Worker pool is shutting down");
   }
   
   // Quick check before locking.
-  if (idle_workers_.load(std::memory_order_relaxed) <= 0) {
+  if (idle_workers_.load(std::memory_order_acquire) <= 0) {
     return absl::ResourceExhaustedError("No idle workers available");
   }
 
   absl::MutexLock lock(&mutex_);
   // Re-check after locking.
-  if (shutting_down_.load(std::memory_order_relaxed)) {
+  if (shutting_down_.load(std::memory_order_acquire)) {
     return absl::FailedPreconditionError("Worker pool is shutting down");
   }
 
@@ -107,13 +121,13 @@ bool WarmWorkerPool::Worker::TryAssign(std::shared_ptr<WorkerTask> task) {
 }
 
 void WarmWorkerPool::Worker::Notify() {
-  stopping_.store(true, std::memory_order_relaxed);
+  stopping_.store(true, std::memory_order_release);
   absl::MutexLock lock(&mutex_);
   cv_.Signal();
 }
 
 void WarmWorkerPool::Worker::Join() {
-  stopping_.store(true, std::memory_order_relaxed);
+  stopping_.store(true, std::memory_order_release);
   {
     absl::MutexLock lock(&mutex_);
     cv_.Signal();
@@ -128,10 +142,10 @@ void WarmWorkerPool::Worker::Run() {
     std::shared_ptr<WorkerTask> task;
     {
       absl::MutexLock lock(&mutex_);
-      while (task_ == nullptr && !stopping_.load(std::memory_order_relaxed)) {
+      while (task_ == nullptr && !stopping_.load(std::memory_order_acquire)) {
         cv_.Wait(&mutex_);
       }
-      if (stopping_.load(std::memory_order_relaxed) && task_ == nullptr) {
+      if (stopping_.load(std::memory_order_acquire) && task_ == nullptr) {
         break;
       }
       task = std::move(task_);

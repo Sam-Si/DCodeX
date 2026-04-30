@@ -391,8 +391,13 @@ void DynamicWorkerCoordinator::Worker::Run() {
       DoRecycle();
 
       WorkerState expected = WorkerState::kRecycling;
-      state_.compare_exchange_strong(expected, WorkerState::kIdle,
-                                     std::memory_order_acq_rel);
+      if (!state_.compare_exchange_strong(expected, WorkerState::kIdle,
+                                          std::memory_order_acq_rel)) {
+        // State was changed to kShutdown during recycling. Do NOT scan the
+        // pool queue — we must exit the worker loop to avoid dequeuing a
+        // request that we'll never execute (which causes caller hangs).
+        break;
+      }
 
       // After recycling, scan the pool queue for a waiting request.
       // Lock order: pool->mutex_ is taken here, worker->mutex_ is taken
