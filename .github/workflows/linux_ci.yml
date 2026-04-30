@@ -100,10 +100,11 @@ jobs:
         bazel --bazelrc=.github/workflows/ci.bazelrc test --config=asan //... \
           --jobs=2
 
-    - name: Bazel Test (MSan)
-      run: |
-        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=msan //... \
-          --jobs=2
+    # MSan is intentionally excluded from CI. It requires ALL linked libraries
+    # (including libstdc++) to be compiled with MSan instrumentation. The system
+    # libstdc++ on GitHub runners is not instrumented, producing false positives
+    # in googletest before any DCodeX code even runs. To use MSan, build a
+    # custom toolchain with instrumented libc++ (see: https://clang.llvm.org/docs/MemorySanitizer.html#handling-external-code).
 
     - name: Upload Test Logs on Failure
       if: failure()
