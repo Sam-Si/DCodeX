@@ -273,11 +273,12 @@ if [[ ! -f "${REPO_DIR}/bin/grpcurl" ]]; then
   chmod +x "${REPO_DIR}/bin/grpcurl"
 fi
 
-info "Upgrading pip..."
-python -m pip install --quiet --upgrade pip
-
 info "Installing grpcio-tools and client requirements..."
-python -m pip install --quiet \
+# --break-system-packages: Ubuntu 24.04+ marks system Python as EXTERNALLY-MANAGED.
+# Since we're running as root in CI/Docker, venvs are unnecessary overhead.
+# We skip `pip install --upgrade pip` because the apt-managed pip cannot be
+# upgraded via pip itself (RECORD file not found).
+python -m pip install --quiet --break-system-packages \
   grpcio-tools \
   -r "${REPO_DIR}/python_client/requirements.txt"
 
