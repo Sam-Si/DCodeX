@@ -278,7 +278,7 @@ info "Installing grpcio-tools and client requirements..."
 # Since we're running as root in CI/Docker, venvs are unnecessary overhead.
 # We skip `pip install --upgrade pip` because the apt-managed pip cannot be
 # upgraded via pip itself (RECORD file not found).
-python -m pip install --quiet --break-system-packages \
+python -m pip install --quiet --break-system-packages --ignore-installed \
   grpcio-tools \
   -r "${REPO_DIR}/python_client/requirements.txt"
 
