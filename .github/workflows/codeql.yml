@@ -1,0 +1,78 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run weekly on Sundays at 04:00 UTC to catch new CVEs in dependencies.
+    - cron: '0 4 * * 0'
+
+jobs:
+  analyze:
+    name: Analyze (C/C++)
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write    # Required to upload SARIF results.
+      contents: read            # Required to checkout code.
+      actions: read             # Required for private repos.
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # CodeQL supports: cpp, csharp, go, java, javascript, python, ruby, swift.
+        language: [ 'c-cpp' ]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # ── Initialize CodeQL ────────────────────────────────────────────
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        # Use the extended query suite for deeper analysis (security + quality).
+        queries: security-extended
+
+    # ── Toolchain Setup ──────────────────────────────────────────────
+    # CodeQL for C/C++ needs to observe the build. We must set up the
+    # same LLVM 19 + Bazel toolchain used by the main CI pipeline so
+    # that the CodeQL tracer can instrument the compilation.
+    - name: Set up LLVM 19
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg ca-certificates
+        sudo mkdir -p /usr/share/keyrings
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+        sudo apt-get update
+        sudo apt-get install -y clang-19 lld-19 libclang-rt-19-dev
+        sudo ln -sf /usr/bin/clang-19 /usr/bin/clang
+        sudo ln -sf /usr/bin/clang++-19 /usr/bin/clang++
+        sudo ln -sf /usr/bin/lld-19 /usr/bin/lld
+
+    - name: Cache Bazel
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/bazel
+        key: ${{ runner.os }}-codeql-bazel-${{ hashFiles('**/MODULE.bazel', '**/WORKSPACE', '**/WORKSPACE.bazel') }}
+        restore-keys: |
+          ${{ runner.os }}-codeql-bazel-
+
+    # ── Build (observed by CodeQL tracer) ────────────────────────────
+    # Use the CI bazelrc for resource-constrained runners.
+    # Build all targets so CodeQL sees the full source graph.
+    - name: Bazel Build (CodeQL traced)
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc build \
+          --verbose_failures \
+          //...
+
+    # ── Upload Results ───────────────────────────────────────────────
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{ matrix.language }}"
