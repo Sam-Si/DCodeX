@@ -57,10 +57,12 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
 
     # The dcodex-setup.sh runs as root (sudo), creating .bazel/output_base
-    # owned by root. Subsequent Bazel steps run as the runner user and need
-    # read/write access to this directory tree.
-    - name: Fix .bazel directory permissions
-      run: sudo chown -R "$(id -u):$(id -g)" .bazel
+    # and /tmp/bazel-test-logs (via .bazelrc --test_tmpdir) owned by root.
+    # Subsequent Bazel steps run as the runner user and need read/write access.
+    - name: Fix root-owned directory permissions
+      run: |
+        sudo chown -R "$(id -u):$(id -g)" .bazel
+        sudo chown -R "$(id -u):$(id -g)" /tmp/bazel-test-logs 2>/dev/null || true
 
     # ── Fine-grained Test Steps ──────────────────────────────────────
     # These provide per-sanitizer visibility in the GitHub Actions UI.
