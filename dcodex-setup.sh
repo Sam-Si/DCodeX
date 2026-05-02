@@ -375,15 +375,31 @@ ENGINE_TESTS=(
 # are diagnosable without manually navigating the output tree.
 dump_test_logs() {
   local config_name="$1"
-  local log_dir="${REPO_DIR}/.bazel/testlogs"
+  local log_dir="${REPO_DIR}/bazel-testlogs"
   
-  # Also check the standard symlink
-  [[ -d "${REPO_DIR}/bazel-testlogs" ]] && log_dir="${REPO_DIR}/bazel-testlogs"
+  # The bazel-testlogs convenience symlink is the primary source.
+  # Fall back to the output_base path used when --output_base is set,
+  # and finally to the .bazel/testlogs path from dcodex-setup config.
+  if [[ ! -d "$log_dir" ]]; then
+    # Search for testlogs under the output_base tree (CI layout).
+    local output_base_logs
+    output_base_logs=$(find "${REPO_DIR}/.bazel" -type d -name "testlogs" 2>/dev/null | head -n1)
+    if [[ -n "$output_base_logs" ]]; then
+      log_dir="$output_base_logs"
+    fi
+  fi
 
   echo ""
   echo -e "${RED}${BOLD}━━━  ${config_name} FAILURE — Test Log Dump  ━━━${NC}"
   
   local found_logs=0
+  local find_args=("$log_dir" -name "test.log")
+  # Only apply -newer filter if the timestamp file exists.
+  if [[ -f /tmp/dcodex-test-ts-"$config_name" ]]; then
+    find_args+=(-newer /tmp/dcodex-test-ts-"$config_name")
+  fi
+  find_args+=(-print0)
+
   while IFS= read -r -d '' logfile; do
     found_logs=1
     local rel_path="${logfile#"${log_dir}/"}"
@@ -391,10 +407,10 @@ dump_test_logs() {
     # Print last 200 lines to avoid flooding the terminal with 10k-line logs.
     tail -n 200 "$logfile"
     echo -e "${YELLOW}── end ${rel_path} ──${NC}"
-  done < <(find "$log_dir" -name "test.log" -newer /tmp/dcodex-test-ts-"$config_name" -print0 2>/dev/null)
+  done < <(find "${find_args[@]}" 2>/dev/null)
   
   if [[ $found_logs -eq 0 ]]; then
-    echo -e "${YELLOW}  (no test.log files found — test may have failed during build)${NC}"
+    echo -e "${YELLOW}  (no test.log files found in ${log_dir})${NC}"
     echo -e "${YELLOW}  Check the build output above for compiler errors.${NC}"
   fi
   echo ""
