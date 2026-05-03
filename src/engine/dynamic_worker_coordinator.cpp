@@ -385,14 +385,27 @@ void DynamicWorkerCoordinator::Worker::Run() {
       current_task->StartExecution();
       current_task->PumpWrites();
 
-      // Transition to RECYCLING. compare_exchange prevents overwriting kShutdown
-      // if NotifyShutdown() was called during task execution.
-      state_.store(WorkerState::kRecycling, std::memory_order_release);
+      // Transition to RECYCLING via compare_exchange to prevent overwriting
+      // kShutdown if NotifyShutdown() was called during task execution.
+      // Without this, the worker could clobber kShutdown with kRecycling,
+      // then transition to kIdle and block forever in cv_.Wait() — a deadlock
+      // because Shutdown() already called NotifyShutdown() and won't again.
+      WorkerState expected_busy = WorkerState::kBusy;
+      if (!state_.compare_exchange_strong(expected_busy, WorkerState::kRecycling,
+                                          std::memory_order_acq_rel)) {
+        // State was changed to kShutdown during task execution. Exit now.
+        break;
+      }
       DoRecycle();
 
       WorkerState expected = WorkerState::kRecycling;
-      state_.compare_exchange_strong(expected, WorkerState::kIdle,
-                                     std::memory_order_acq_rel);
+      if (!state_.compare_exchange_strong(expected, WorkerState::kIdle,
+                                          std::memory_order_acq_rel)) {
+        // State was changed to kShutdown during recycling. Do NOT scan the
+        // pool queue — we must exit the worker loop to avoid dequeuing a
+        // request that we'll never execute (which causes caller hangs).
+        break;
+      }
 
       // After recycling, scan the pool queue for a waiting request.
       // Lock order: pool->mutex_ is taken here, worker->mutex_ is taken

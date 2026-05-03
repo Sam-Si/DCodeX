@@ -205,20 +205,22 @@ TEST(DynamicWorkerCoordinatorTest, LeaseTimeout) {
   DynamicWorkerCoordinator::Options opts;
   opts.min_workers = 1;
   opts.max_workers = 1;
-  opts.recycle_duration = absl::Seconds(60);  // Keep worker busy.
+  // Use a short recycle so shutdown doesn't block for minutes.
+  // The gate in task1 keeps the worker busy, not the recycle duration.
+  opts.recycle_duration = absl::Milliseconds(200);
   opts.balance_period = absl::Seconds(60);
   opts.lease_timeout = absl::Milliseconds(100);
   DynamicWorkerCoordinator coordinator(opts);
   coordinator.Start();
 
-  // Occupy the sole worker indefinitely.
+  // Occupy the sole worker via the gate — it blocks in StartExecution.
   std::atomic<int> c1{0};
   absl::Notification gate, done1;
   auto task1 = std::make_shared<TestTask>(&c1, &gate, &done1);
   auto lease1 = coordinator.LeaseWorker(LanguageId::kCpp, task1);
   ASSERT_TRUE(lease1.ok());
 
-  // Second request must time out.
+  // Second request must time out (worker is blocked on gate).
   std::atomic<int> c2{0};
   absl::Notification done2;
   auto task2 = std::make_shared<TestTask>(&c2, nullptr, &done2);
@@ -228,7 +230,7 @@ TEST(DynamicWorkerCoordinatorTest, LeaseTimeout) {
   EXPECT_EQ(lease2.status().code(), absl::StatusCode::kDeadlineExceeded)
       << lease2.status();
 
-  // Clean up.
+  // Clean up: release the gate so task1 can finish, then shut down.
   gate.Notify();
   done1.WaitForNotification();
   coordinator.ReleaseWorker(*lease1);

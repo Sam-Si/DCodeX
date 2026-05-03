@@ -40,24 +40,70 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-bazel-
 
+    # ── Environment Verification ─────────────────────────────────────
+    # Runs the full dcodex-setup.sh --test to verify the environment is
+    # correctly configured and all sanitizer suites pass. This catches
+    # setup-level issues (missing deps, broken symlinks) that individual
+    # test steps wouldn't detect.
+    - name: "🔧 Environment Verification (dcodex-setup.sh --test)"
+      run: |
+        chmod +x ./dcodex-setup.sh
+        sudo REPO_DIR="$GITHUB_WORKSPACE" \
+             BAZEL_JOBS=4 \
+             BAZEL_MEM_MB=2048 \
+             SKIP_APT=0 \
+             ./dcodex-setup.sh --test
+      env:
+        DEBIAN_FRONTEND: noninteractive
+
+    # The dcodex-setup.sh runs as root (sudo), creating .bazel/output_base
+    # and /tmp/bazel-test-logs (via .bazelrc --test_tmpdir) owned by root.
+    # Subsequent Bazel steps run as the runner user and need read/write access.
+    - name: Fix root-owned directory permissions
+      run: |
+        sudo chown -R "$(id -u):$(id -g)" .bazel
+        sudo chown -R "$(id -u):$(id -g)" /tmp/bazel-test-logs 2>/dev/null || true
+
+    # ── Fine-grained Test Steps ──────────────────────────────────────
+    # These provide per-sanitizer visibility in the GitHub Actions UI.
+    # The dcodex-setup.sh step above is the single source of truth;
+    # these are redundant-but-visible steps for PR review ergonomics.
+
     - name: Bazel Build
       run: |
-        bazel --bazelrc=.github/workflows/ci.bazelrc build //...
+        bazel --bazelrc=.github/workflows/ci.bazelrc build \
+          --verbose_failures \
+          //...
 
     - name: Bazel Test (Standard)
       run: |
-        bazel --bazelrc=.github/workflows/ci.bazelrc test //...
+        bazel --bazelrc=.github/workflows/ci.bazelrc test \
+          --verbose_failures \
+          //...
 
-    - name: Bazel Test (TSan)
+    - name: Bazel Test (ASan + UBSan)
       run: |
-        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
-          //... \
+        bazel --bazelrc=.github/workflows/ci.bazelrc test \
+          --config=asan \
+          --verbose_failures \
           --jobs=2 \
-          --test_tag_filters=-no-sandbox-tsan
+          //src/engine:sandbox_test \
+          //src/engine:warm_worker_pool_test \
+          //src/engine:dynamic_worker_coordinator_test \
+          //src/engine:tsan_checker
 
-    - name: Bazel Test (TSan - Sandbox, constrained)
+    - name: Bazel Test (TSan — concurrency tests)
       run: |
         bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
+          --verbose_failures \
+          --jobs=2 \
+          --test_tag_filters=-no-sandbox-tsan \
+          //...
+
+    - name: Bazel Test (TSan — Sandbox, constrained)
+      run: |
+        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=tsan \
+          --verbose_failures \
           //src/engine:sandbox_test \
           --jobs=1 \
           --runs_per_test=1 \
@@ -95,11 +141,6 @@ jobs:
           exit 1
         fi
 
-    - name: Bazel Test (ASan)
-      run: |
-        bazel --bazelrc=.github/workflows/ci.bazelrc test --config=asan //... \
-          --jobs=2
-
     # MSan is intentionally excluded from CI. It requires ALL linked libraries
     # (including libstdc++) to be compiled with MSan instrumentation. The system
     # libstdc++ on GitHub runners is not instrumented, producing false positives
@@ -111,4 +152,6 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: bazel-test-logs
-        path: bazel-testlogs/
+        path: |
+          bazel-testlogs/
+          /tmp/dcodex-test-*.log
