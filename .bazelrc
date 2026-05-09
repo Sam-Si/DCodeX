@@ -44,9 +44,14 @@ build --jobs=20
 build --local_resources=cpu=16
 build --local_resources=memory=57344
 
-# Linux Sandbox Hardening: Fixes "File exists" and "/dev/null" errors
+# Linux Sandbox Hardening
+#   --sandbox_tmpfs_path=/tmp   : clean /tmp per action (isolation)
+#   --sandbox_add_mount_pair    : ensures /dev/null is available
+#   --sandbox_base=/dev/shm     : use tmpfs-backed sandbox dirs — prevents
+#       "File exists" errors from stale state after interrupted builds
 build:linux --sandbox_tmpfs_path=/tmp
 build:linux --sandbox_add_mount_pair=/dev/null
+build:linux --sandbox_base=/dev/shm
 build:linux --dynamic_mode=off
 build:linux --linkopt=-Wl,--threads=16
 
