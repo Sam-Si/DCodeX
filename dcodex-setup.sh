@@ -361,9 +361,11 @@ timer
 step "6/7  Tests"
 
 # Common Bazel test flags for diagnostics — always verbose.
+# NOTE: --sandbox_debug is intentionally omitted; it dumps per-action
+# traces for every compile/link step, drowning test output. Pass it
+# manually if debugging sandbox issues: bazel test --sandbox_debug ...
 BAZEL_TEST_COMMON=(
   --verbose_failures
-  --sandbox_debug
   --test_output=all
   --test_env=HOME=/tmp
 )
