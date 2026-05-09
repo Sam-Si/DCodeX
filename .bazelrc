@@ -47,11 +47,12 @@ build --local_resources=memory=57344
 # Linux Sandbox Hardening
 #   --sandbox_tmpfs_path=/tmp   : clean /tmp per action (isolation)
 #   --sandbox_add_mount_pair    : ensures /dev/null is available
-#   --sandbox_base=/dev/shm     : use tmpfs-backed sandbox dirs — prevents
-#       "File exists" errors from stale state after interrupted builds
+#   NOTE: Do NOT use --sandbox_base=/dev/shm — Docker containers default
+#   to 64MB /dev/shm which is too small for linking large binaries.
+#   Stale sandbox state ("File exists" errors) is handled by cleaning
+#   .bazel/output_base/sandbox before builds (see dcodex-setup.sh).
 build:linux --sandbox_tmpfs_path=/tmp
 build:linux --sandbox_add_mount_pair=/dev/null
-build:linux --sandbox_base=/dev/shm
 build:linux --dynamic_mode=off
 build:linux --linkopt=-Wl,--threads=16
 
