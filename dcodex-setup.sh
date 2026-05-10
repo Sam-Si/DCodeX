@@ -309,6 +309,17 @@ else
   ok "Skipping bazel clean (incremental build — disk cache preserved)"
 fi
 
+# Always purge stale sandbox directories. If a previous build was interrupted
+# (Ctrl+C, OOM kill, crash), leftover files cause "File exists" errors on the
+# next run. This is cheap (~instant) and only removes sandbox working dirs —
+# the disk cache and repo cache are untouched.
+if [[ -d "${REPO_DIR}/.bazel/output_base/sandbox" ]]; then
+  rm -rf "${REPO_DIR}/.bazel/output_base/sandbox"
+  ok "Purged stale sandbox directories"
+else
+  ok "No stale sandbox directories to clean"
+fi
+
 timer
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,9 +361,11 @@ timer
 step "6/7  Tests"
 
 # Common Bazel test flags for diagnostics — always verbose.
+# NOTE: --sandbox_debug is intentionally omitted; it dumps per-action
+# traces for every compile/link step, drowning test output. Pass it
+# manually if debugging sandbox issues: bazel test --sandbox_debug ...
 BAZEL_TEST_COMMON=(
   --verbose_failures
-  --sandbox_debug
   --test_output=all
   --test_env=HOME=/tmp
 )
