@@ -45,14 +45,18 @@ build --local_resources=cpu=16
 build --local_resources=memory=57344
 
 # Linux Sandbox Hardening
-#   --sandbox_tmpfs_path=/tmp   : clean /tmp per action (isolation)
-#   --sandbox_add_mount_pair    : ensures /dev/null is available
+#   --sandbox_tmpfs_path=/tmp       : clean /tmp per action (isolation)
+#   --sandbox_add_mount_pair        : bind-mounts /dev/null into sandbox
+#   --sandbox_writable_path         : makes /dev/null writable (Bazel's
+#       test-setup.sh redirects to /dev/null; without this the bind-mount
+#       is read-only and tests fail with "Read-only file system")
 #   NOTE: Do NOT use --sandbox_base=/dev/shm — Docker containers default
 #   to 64MB /dev/shm which is too small for linking large binaries.
 #   Stale sandbox state ("File exists" errors) is handled by cleaning
 #   .bazel/output_base/sandbox before builds (see dcodex-setup.sh).
 build:linux --sandbox_tmpfs_path=/tmp
 build:linux --sandbox_add_mount_pair=/dev/null
+build:linux --sandbox_writable_path=/dev/null
 build:linux --dynamic_mode=off
 build:linux --linkopt=-Wl,--threads=16
 
@@ -67,6 +71,14 @@ build --spawn_strategy=sandboxed,standalone
 build --strategy=CppCompile=sandboxed,standalone
 build --strategy=CppLink=sandboxed,standalone
 build --genrule_strategy=sandboxed,standalone
+
+# Disable sandbox directory reuse for tests.  Bazel 7.x defaults
+# --experimental_reuse_sandbox_directories=true which recycles sandbox
+# dirs across actions.  With high --runs_per_test (TSan uses 20) and
+# concurrent --local_test_jobs, the async cleanup races against new
+# sandbox setup, producing "Could not copy inputs into sandbox (File
+# exists)" failures.  Builds still benefit from reuse; only tests opt out.
+test --noexperimental_reuse_sandbox_directories
 
 # ------------------------------------------------------------
 # 6. CACHING 

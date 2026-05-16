@@ -113,6 +113,20 @@ version_gte() {
   [[ "$(printf '%s\n%s' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
+# Remove stale sandbox working directories.  Leftover sandbox state from
+# a previous build/test (Ctrl+C, OOM kill, crash, or Bazel's own async
+# cleanup not finishing in time) causes "Could not copy inputs into
+# sandbox … (File exists)" on the next run.  This is cheap (~instant)
+# and only removes sandbox working dirs — disk cache & repo cache are
+# untouched.  Called once at startup AND before every `bazel test`
+# invocation so no stale state ever leaks across sanitizer suites.
+purge_sandbox_dirs() {
+  local sandbox_dir="${REPO_DIR}/.bazel/output_base/sandbox"
+  if [[ -d "$sandbox_dir" ]]; then
+    rm -rf "$sandbox_dir"
+  fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1 — Pre-flight checks
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,16 +323,8 @@ else
   ok "Skipping bazel clean (incremental build — disk cache preserved)"
 fi
 
-# Always purge stale sandbox directories. If a previous build was interrupted
-# (Ctrl+C, OOM kill, crash), leftover files cause "File exists" errors on the
-# next run. This is cheap (~instant) and only removes sandbox working dirs —
-# the disk cache and repo cache are untouched.
-if [[ -d "${REPO_DIR}/.bazel/output_base/sandbox" ]]; then
-  rm -rf "${REPO_DIR}/.bazel/output_base/sandbox"
-  ok "Purged stale sandbox directories"
-else
-  ok "No stale sandbox directories to clean"
-fi
+purge_sandbox_dirs
+ok "Sandbox directories clean"
 
 timer
 
@@ -439,6 +445,10 @@ run_sanitizer_suite() {
   
   info "Running ${config_name} tests: ${targets[*]}"
   
+  # Purge sandbox dirs from previous suite so no stale state leaks across
+  # sanitizer configurations (asan → tsan → msan).
+  purge_sandbox_dirs
+  
   # Timestamp file for dump_test_logs() to find only fresh logs.
   touch /tmp/dcodex-test-ts-"$config_name"
   
@@ -508,6 +518,7 @@ if [[ "$MODE" == "test" ]]; then
   # The sandbox_test forks clang++ which has high memory overhead under TSan.
   if [[ $TEST_STATUS_TSAN -eq 0 ]]; then
     info "Running sandbox_test under TSan (constrained: 1 job, 1 run)..."
+    purge_sandbox_dirs
     touch /tmp/dcodex-test-ts-tsan-sandbox
     set +e
     bazel "${BAZEL_JVM_FLAGS[@]}" test \
