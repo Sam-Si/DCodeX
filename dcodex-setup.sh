@@ -135,6 +135,7 @@ purge_sandbox_dirs() {
   if [[ -d "$test_sandbox" ]]; then
     rm -rf "$test_sandbox"
   fi
+  mkdir -p "$test_sandbox"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
