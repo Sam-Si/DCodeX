@@ -205,8 +205,10 @@ http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-${LLVM
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       "clang-${LLVM_VERSION}" \
       "lld-${LLVM_VERSION}" \
+      "libc++-${LLVM_VERSION}-dev" \
+      "libc++abi-${LLVM_VERSION}-dev" \
       2>/dev/null
-    ok "LLVM ${LLVM_VERSION} installed"
+    ok "LLVM ${LLVM_VERSION} installed (includes libc++ for MSan)"
   fi
 
   # ── Sanitizer runtime headers (needed for --config=asan/msan/tsan) ───────
@@ -484,24 +486,14 @@ if [[ "$MODE" == "test" ]]; then
   run_sanitizer_suite asan "${ENGINE_TESTS[@]}" || TEST_STATUS_ASAN=$?
 
   # ── MSan ──────────────────────────────────────────────────────────────
-  step "6b/7  MSan Tests (SKIPPED)"
-  warn "MSan requires ALL linked libraries (including system libstdc++) to be"
-  warn "  compiled with -fsanitize=memory. The system libstdc++ is NOT instrumented,"
-  warn "  causing false positives in googletest before any DCodeX code runs."
-  warn "  → Matching CI decision: MSan is excluded from automated testing."
-  warn "  → To run MSan, build a custom toolchain with instrumented libc++."
-  warn "  → See: https://clang.llvm.org/docs/MemorySanitizer.html#handling-external-code"
-  info "MSan skipped (set RUN_MSAN=1 to force-run with suppressions)"
-  
-  if [[ "${RUN_MSAN:-0}" == "1" ]]; then
-    warn "RUN_MSAN=1 — running MSan anyway (expect false positives)..."
-    MSAN_TARGETS=(
-      "//src/engine:warm_worker_pool_test"
-      "//src/engine:dynamic_worker_coordinator_test"
-      "//src/engine:tsan_checker"
-    )
-    run_sanitizer_suite msan "${MSAN_TARGETS[@]}" || TEST_STATUS_MSAN=$?
-  fi
+  step "6b/7  MSan Tests"
+  # MSan targets exclude sandbox_test (spawns uninstrumented clang++/python3
+  # subprocesses which produce false positives) and tsan_checker (TSan-specific).
+  MSAN_TARGETS=(
+    "//src/engine:warm_worker_pool_test"
+    "//src/engine:dynamic_worker_coordinator_test"
+  )
+  run_sanitizer_suite msan "${MSAN_TARGETS[@]}" || TEST_STATUS_MSAN=$?
 
   # ── TSan ──────────────────────────────────────────────────────────────
   step "6c/7  TSan Tests"
@@ -548,13 +540,13 @@ if [[ "$MODE" == "test" ]]; then
   echo ""
   echo -e "${BOLD}${CYAN}━━━  Test Summary  ━━━${NC}"
   echo -e "  ASan + UBSan:  $(if [[ $TEST_STATUS_ASAN -eq 0 ]]; then echo -e "${GREEN}PASS${NC}"; else echo -e "${RED}FAIL (exit $TEST_STATUS_ASAN)${NC}"; fi)"
-  echo -e "  MSan:          $(if [[ "${RUN_MSAN:-0}" == "1" ]]; then if [[ $TEST_STATUS_MSAN -eq 0 ]]; then echo -e "${GREEN}PASS${NC}"; else echo -e "${RED}FAIL (exit $TEST_STATUS_MSAN)${NC}"; fi; else echo -e "${YELLOW}SKIPPED${NC}"; fi)"
+  echo -e "  MSan:          $(if [[ $TEST_STATUS_MSAN -eq 0 ]]; then echo -e "${GREEN}PASS${NC}"; else echo -e "${RED}FAIL (exit $TEST_STATUS_MSAN)${NC}"; fi)"
   echo -e "  TSan:          $(if [[ $TEST_STATUS_TSAN -eq 0 ]]; then echo -e "${GREEN}PASS${NC}"; else echo -e "${RED}FAIL (exit $TEST_STATUS_TSAN)${NC}"; fi)"
   echo -e "  Duration:      $(( TEST_END - TEST_START ))s"
-  echo -e "  Logs:          /tmp/dcodex-test-{asan,tsan}.log"
+  echo -e "  Logs:          /tmp/dcodex-test-{asan,msan,tsan}.log"
   echo ""
 
-  if [[ $TEST_STATUS_ASAN -eq 0 && $TEST_STATUS_TSAN -eq 0 ]]; then
+  if [[ $TEST_STATUS_ASAN -eq 0 && $TEST_STATUS_MSAN -eq 0 && $TEST_STATUS_TSAN -eq 0 ]]; then
     ok "All active test suites passed in $(( TEST_END - TEST_START ))s"
   else
     FAILED_SUITES=""

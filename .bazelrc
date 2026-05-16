@@ -157,15 +157,18 @@ build:coverage --combined_report=lcov
 # -- MSan: MemorySanitizer --
 # Usage: bazel test --config=msan //...
 # Detects: reads of uninitialized memory.
-# WARNING: MSan requires ALL linked libraries (including libc++) to be
-#   compiled with -fsanitize=memory. If you see false positives from
-#   std::string / std::vector, you must provide an MSan-instrumented
-#   libc++ via: build:msan --linkopt=-stdlib=libc++ (custom build).
+# MSan requires -stdlib=libc++ because the MSan runtime has interceptors
+# for libc++ but NOT for libstdc++.  Without libc++, googletest itself
+# triggers false positives before any DCodeX code runs.
+# Requires: libc++-dev and libc++abi-dev (installed by dcodex-setup.sh).
 build:msan --config=sanitizer_common
 build:msan --copt=-fsanitize=memory
 build:msan --copt=-fsanitize-memory-track-origins=2
 build:msan --linkopt=-fsanitize=memory
 build:msan --copt=-DMEMORY_SANITIZER
+build:msan --copt=-stdlib=libc++
+build:msan --linkopt=-stdlib=libc++
+build:msan --linkopt=-lc++abi
 test:msan --action_env=MSAN_OPTIONS="halt_on_error=1:exitcode=77"
 
 # -- ASan + UBSan: AddressSanitizer + UndefinedBehaviorSanitizer --
