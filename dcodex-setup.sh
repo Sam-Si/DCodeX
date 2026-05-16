@@ -120,10 +120,20 @@ version_gte() {
 # and only removes sandbox working dirs — disk cache & repo cache are
 # untouched.  Called once at startup AND before every `bazel test`
 # invocation so no stale state ever leaks across sanitizer suites.
+#
+# Two locations are cleaned:
+#   1. output_base/sandbox — default sandbox root (used by build actions)
+#   2. /tmp/bazel-sandbox  — dedicated test sandbox root (set via
+#      --sandbox_base in .bazelrc) to keep test sandboxes isolated from
+#      build sandboxes.
 purge_sandbox_dirs() {
-  local sandbox_dir="${REPO_DIR}/.bazel/output_base/sandbox"
-  if [[ -d "$sandbox_dir" ]]; then
-    rm -rf "$sandbox_dir"
+  local build_sandbox="${REPO_DIR}/.bazel/output_base/sandbox"
+  local test_sandbox="/tmp/bazel-sandbox"
+  if [[ -d "$build_sandbox" ]]; then
+    rm -rf "$build_sandbox"
+  fi
+  if [[ -d "$test_sandbox" ]]; then
+    rm -rf "$test_sandbox"
   fi
 }
 

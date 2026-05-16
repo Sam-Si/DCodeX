@@ -50,10 +50,10 @@ build --local_resources=memory=57344
 #   --sandbox_writable_path         : makes /dev/null writable (Bazel's
 #       test-setup.sh redirects to /dev/null; without this the bind-mount
 #       is read-only and tests fail with "Read-only file system")
-#   NOTE: Do NOT use --sandbox_base=/dev/shm — Docker containers default
-#   to 64MB /dev/shm which is too small for linking large binaries.
-#   Stale sandbox state ("File exists" errors) is handled by cleaning
-#   .bazel/output_base/sandbox before builds (see dcodex-setup.sh).
+#   NOTE: Build sandboxes stay under output_base (not /dev/shm — Docker
+#   defaults to 64MB which is too small for linking large binaries).
+#   Test sandboxes are redirected to /tmp/bazel-sandbox (see §5 below).
+#   Stale sandbox state is purged by dcodex-setup.sh between suites.
 build:linux --sandbox_tmpfs_path=/tmp
 build:linux --sandbox_add_mount_pair=/dev/null
 build:linux --sandbox_writable_path=/dev/null
@@ -72,13 +72,25 @@ build --strategy=CppCompile=sandboxed,standalone
 build --strategy=CppLink=sandboxed,standalone
 build --genrule_strategy=sandboxed,standalone
 
-# Disable sandbox directory reuse for tests.  Bazel 7.x defaults
-# --experimental_reuse_sandbox_directories=true which recycles sandbox
-# dirs across actions.  With high --runs_per_test (TSan uses 20) and
-# concurrent --local_test_jobs, the async cleanup races against new
-# sandbox setup, producing "Could not copy inputs into sandbox (File
-# exists)" failures.  Builds still benefit from reuse; only tests opt out.
-test --noexperimental_reuse_sandbox_directories
+# Collision-free test sandboxing.  Three independent safeguards:
+#
+# 1. Separate sandbox root — test sandboxes live under /tmp/bazel-sandbox,
+#    completely isolated from build sandboxes (which stay under output_base).
+#    Eliminates cross-action path contention in Docker's overlay filesystem.
+#
+# 2. No directory reuse — Bazel 7.x defaults --reuse_sandbox_directories=true
+#    which recycles sandbox dirs across actions.  With high --runs_per_test
+#    (TSan uses 20) and concurrent --local_test_jobs, the async cleanup
+#    races against new sandbox setup → "Could not copy inputs (File exists)".
+#    Builds still benefit from reuse; only tests opt out.
+#
+# 3. Synchronous cleanup — the default async mode (4 threads) can fall behind
+#    during bursts of short-lived test actions, leaving stale inodes that trip
+#    up the next sandbox setup.  Synchronous deletion guarantees a clean slate
+#    after every action.
+test:linux --sandbox_base=/tmp/bazel-sandbox
+test --noreuse_sandbox_directories
+test --experimental_sandbox_async_tree_delete_idle_threads=0
 
 # ------------------------------------------------------------
 # 6. CACHING 
