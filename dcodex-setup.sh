@@ -222,6 +222,18 @@ http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-${LLVM
     || warn "libclang-rt-${LLVM_VERSION}-dev not available — sanitizer builds may fail"
   ok "Sanitizer runtime headers installed"
 
+  # ── libc++ (required for MSan — see .bazelrc msan config) ────────────
+  # MSan needs -stdlib=libc++ because its runtime has interceptors for
+  # libc++ but not libstdc++.  Without libc++, <cstdint> and other
+  # standard headers are missing and compilation fails.
+  info "Ensuring libc++ is installed (required for MSan)..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    "libc++-${LLVM_VERSION}-dev" \
+    "libc++abi-${LLVM_VERSION}-dev" \
+    2>/dev/null \
+    || warn "libc++ packages not available — MSan builds will fail"
+  ok "libc++ installed"
+
   # ── Symlinks ─────────────────────────────────────────────────────────────
   info "Creating LLVM symlinks..."
   ln -sf "/usr/bin/clang-${LLVM_VERSION}"   /usr/bin/clang
