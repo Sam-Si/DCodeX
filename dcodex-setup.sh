@@ -113,6 +113,20 @@ version_gte() {
   [[ "$(printf '%s\n%s' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
+# Remove stale sandbox working directories.  Leftover sandbox state from
+# a previous build/test (Ctrl+C, OOM kill, crash, or Bazel's own async
+# cleanup not finishing in time) causes "Could not copy inputs into
+# sandbox … (File exists)" on the next run.  This is cheap (~instant)
+# and only removes sandbox working dirs — disk cache & repo cache are
+# untouched.  Called once at startup AND before every `bazel test`
+# invocation so no stale state ever leaks across sanitizer suites.
+purge_sandbox_dirs() {
+  local sandbox_dir="${REPO_DIR}/.bazel/output_base/sandbox"
+  if [[ -d "$sandbox_dir" ]]; then
+    rm -rf "$sandbox_dir"
+  fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1 — Pre-flight checks
 # ─────────────────────────────────────────────────────────────────────────────
@@ -191,8 +205,10 @@ http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-${LLVM
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       "clang-${LLVM_VERSION}" \
       "lld-${LLVM_VERSION}" \
+      "libc++-${LLVM_VERSION}-dev" \
+      "libc++abi-${LLVM_VERSION}-dev" \
       2>/dev/null
-    ok "LLVM ${LLVM_VERSION} installed"
+    ok "LLVM ${LLVM_VERSION} installed (includes libc++ for MSan)"
   fi
 
   # ── Sanitizer runtime headers (needed for --config=asan/msan/tsan) ───────
@@ -205,6 +221,18 @@ http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-${LLVM
     2>/dev/null \
     || warn "libclang-rt-${LLVM_VERSION}-dev not available — sanitizer builds may fail"
   ok "Sanitizer runtime headers installed"
+
+  # ── libc++ (required for MSan — see .bazelrc msan config) ────────────
+  # MSan needs -stdlib=libc++ because its runtime has interceptors for
+  # libc++ but not libstdc++.  Without libc++, <cstdint> and other
+  # standard headers are missing and compilation fails.
+  info "Ensuring libc++ is installed (required for MSan)..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    "libc++-${LLVM_VERSION}-dev" \
+    "libc++abi-${LLVM_VERSION}-dev" \
+    2>/dev/null \
+    || warn "libc++ packages not available — MSan builds will fail"
+  ok "libc++ installed"
 
   # ── Symlinks ─────────────────────────────────────────────────────────────
   info "Creating LLVM symlinks..."
@@ -309,16 +337,8 @@ else
   ok "Skipping bazel clean (incremental build — disk cache preserved)"
 fi
 
-# Always purge stale sandbox directories. If a previous build was interrupted
-# (Ctrl+C, OOM kill, crash), leftover files cause "File exists" errors on the
-# next run. This is cheap (~instant) and only removes sandbox working dirs —
-# the disk cache and repo cache are untouched.
-if [[ -d "${REPO_DIR}/.bazel/output_base/sandbox" ]]; then
-  rm -rf "${REPO_DIR}/.bazel/output_base/sandbox"
-  ok "Purged stale sandbox directories"
-else
-  ok "No stale sandbox directories to clean"
-fi
+purge_sandbox_dirs
+ok "Sandbox directories clean"
 
 timer
 
@@ -439,6 +459,10 @@ run_sanitizer_suite() {
   
   info "Running ${config_name} tests: ${targets[*]}"
   
+  # Purge sandbox dirs from previous suite so no stale state leaks across
+  # sanitizer configurations (asan → tsan → msan).
+  purge_sandbox_dirs
+  
   # Timestamp file for dump_test_logs() to find only fresh logs.
   touch /tmp/dcodex-test-ts-"$config_name"
   
@@ -474,23 +498,26 @@ if [[ "$MODE" == "test" ]]; then
   run_sanitizer_suite asan "${ENGINE_TESTS[@]}" || TEST_STATUS_ASAN=$?
 
   # ── MSan ──────────────────────────────────────────────────────────────
-  step "6b/7  MSan Tests (SKIPPED)"
-  warn "MSan requires ALL linked libraries (including system libstdc++) to be"
-  warn "  compiled with -fsanitize=memory. The system libstdc++ is NOT instrumented,"
-  warn "  causing false positives in googletest before any DCodeX code runs."
-  warn "  → Matching CI decision: MSan is excluded from automated testing."
-  warn "  → To run MSan, build a custom toolchain with instrumented libc++."
-  warn "  → See: https://clang.llvm.org/docs/MemorySanitizer.html#handling-external-code"
-  info "MSan skipped (set RUN_MSAN=1 to force-run with suppressions)"
-  
-  if [[ "${RUN_MSAN:-0}" == "1" ]]; then
-    warn "RUN_MSAN=1 — running MSan anyway (expect false positives)..."
+  # MSan is gated behind RUN_MSAN=1 because it requires ALL linked libraries
+  # (including libc++) to be compiled with -fsanitize=memory. The system
+  # libc++ installed via apt is NOT instrumented, producing false positives
+  # in googletest and abseil internals. To run MSan properly, build a custom
+  # LLVM toolchain with an MSan-instrumented libc++ (see:
+  # https://clang.llvm.org/docs/MemorySanitizer.html#handling-external-code).
+  RUN_MSAN="${RUN_MSAN:-0}"
+  MSAN_SKIPPED=0
+  step "6b/7  MSan Tests"
+  if [[ "$RUN_MSAN" == "1" ]]; then
+    # MSan targets exclude sandbox_test (spawns uninstrumented clang++/python3
+    # subprocesses which produce false positives) and tsan_checker (TSan-specific).
     MSAN_TARGETS=(
       "//src/engine:warm_worker_pool_test"
       "//src/engine:dynamic_worker_coordinator_test"
-      "//src/engine:tsan_checker"
     )
     run_sanitizer_suite msan "${MSAN_TARGETS[@]}" || TEST_STATUS_MSAN=$?
+  else
+    MSAN_SKIPPED=1
+    warn "MSan tests SKIPPED (set RUN_MSAN=1 to enable — requires instrumented libc++)"
   fi
 
   # ── TSan ──────────────────────────────────────────────────────────────
@@ -508,6 +535,7 @@ if [[ "$MODE" == "test" ]]; then
   # The sandbox_test forks clang++ which has high memory overhead under TSan.
   if [[ $TEST_STATUS_TSAN -eq 0 ]]; then
     info "Running sandbox_test under TSan (constrained: 1 job, 1 run)..."
+    purge_sandbox_dirs
     touch /tmp/dcodex-test-ts-tsan-sandbox
     set +e
     bazel "${BAZEL_JVM_FLAGS[@]}" test \
@@ -537,18 +565,18 @@ if [[ "$MODE" == "test" ]]; then
   echo ""
   echo -e "${BOLD}${CYAN}━━━  Test Summary  ━━━${NC}"
   echo -e "  ASan + UBSan:  $(if [[ $TEST_STATUS_ASAN -eq 0 ]]; then echo -e "${GREEN}PASS${NC}"; else echo -e "${RED}FAIL (exit $TEST_STATUS_ASAN)${NC}"; fi)"
-  echo -e "  MSan:          $(if [[ "${RUN_MSAN:-0}" == "1" ]]; then if [[ $TEST_STATUS_MSAN -eq 0 ]]; then echo -e "${GREEN}PASS${NC}"; else echo -e "${RED}FAIL (exit $TEST_STATUS_MSAN)${NC}"; fi; else echo -e "${YELLOW}SKIPPED${NC}"; fi)"
+  echo -e "  MSan:          $(if [[ $MSAN_SKIPPED -eq 1 ]]; then echo -e "${YELLOW}SKIP${NC}"; elif [[ $TEST_STATUS_MSAN -eq 0 ]]; then echo -e "${GREEN}PASS${NC}"; else echo -e "${RED}FAIL (exit $TEST_STATUS_MSAN)${NC}"; fi)"
   echo -e "  TSan:          $(if [[ $TEST_STATUS_TSAN -eq 0 ]]; then echo -e "${GREEN}PASS${NC}"; else echo -e "${RED}FAIL (exit $TEST_STATUS_TSAN)${NC}"; fi)"
   echo -e "  Duration:      $(( TEST_END - TEST_START ))s"
-  echo -e "  Logs:          /tmp/dcodex-test-{asan,tsan}.log"
+  echo -e "  Logs:          /tmp/dcodex-test-{asan,msan,tsan}.log"
   echo ""
 
-  if [[ $TEST_STATUS_ASAN -eq 0 && $TEST_STATUS_TSAN -eq 0 ]]; then
+  if [[ $TEST_STATUS_ASAN -eq 0 && ($TEST_STATUS_MSAN -eq 0 || $MSAN_SKIPPED -eq 1) && $TEST_STATUS_TSAN -eq 0 ]]; then
     ok "All active test suites passed in $(( TEST_END - TEST_START ))s"
   else
     FAILED_SUITES=""
     [[ $TEST_STATUS_ASAN -ne 0 ]] && FAILED_SUITES+="asan "
-    [[ $TEST_STATUS_MSAN -ne 0 ]] && FAILED_SUITES+="msan "
+    [[ $TEST_STATUS_MSAN -ne 0 && $MSAN_SKIPPED -eq 0 ]] && FAILED_SUITES+="msan "
     [[ $TEST_STATUS_TSAN -ne 0 ]] && FAILED_SUITES+="tsan "
     die "Tests FAILED: ${FAILED_SUITES}— see diagnostic output above and /tmp/dcodex-test-*.log"
   fi

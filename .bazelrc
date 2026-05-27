@@ -46,13 +46,16 @@ build --local_resources=memory=57344
 
 # Linux Sandbox Hardening
 #   --sandbox_tmpfs_path=/tmp   : clean /tmp per action (isolation)
-#   --sandbox_add_mount_pair    : ensures /dev/null is available
-#   NOTE: Do NOT use --sandbox_base=/dev/shm — Docker containers default
-#   to 64MB /dev/shm which is too small for linking large binaries.
-#   Stale sandbox state ("File exists" errors) is handled by cleaning
-#   .bazel/output_base/sandbox before builds (see dcodex-setup.sh).
+#   --sandbox_writable_path=/dev: makes /dev (including /dev/null) available
+#       as a read-write bind mount inside the sandbox.  Bazel's test-setup.sh
+#       redirects to /dev/null and fails if it's read-only.
+#       NOTE: Do NOT also add --sandbox_add_mount_pair=/dev/null — it creates
+#       a separate read-only bind mount that overrides the writable /dev mount.
+#   NOTE: --sandbox_base CANNOT be under /tmp when --sandbox_tmpfs_path=/tmp
+#   is set — the tmpfs mount would wipe out the sandbox working directory.
+#   Stale sandbox state is purged by dcodex-setup.sh between suites.
 build:linux --sandbox_tmpfs_path=/tmp
-build:linux --sandbox_add_mount_pair=/dev/null
+build:linux --sandbox_writable_path=/dev
 build:linux --dynamic_mode=off
 build:linux --linkopt=-Wl,--threads=16
 
@@ -67,6 +70,25 @@ build --spawn_strategy=sandboxed,standalone
 build --strategy=CppCompile=sandboxed,standalone
 build --strategy=CppLink=sandboxed,standalone
 build --genrule_strategy=sandboxed,standalone
+
+# Collision-free test sandboxing.  Two independent safeguards:
+#
+# 1. No directory reuse — Bazel 7.x defaults --reuse_sandbox_directories=true
+#    which recycles sandbox dirs across actions.  With high --runs_per_test
+#    (TSan uses 20) and concurrent --local_test_jobs, the async cleanup
+#    races against new sandbox setup → "Could not copy inputs (File exists)".
+#    Builds still benefit from reuse; only tests opt out.
+#
+# 2. Synchronous cleanup — the default async mode (4 threads) can fall behind
+#    during bursts of short-lived test actions, leaving stale inodes that trip
+#    up the next sandbox setup.  Synchronous deletion guarantees a clean slate
+#    after every action.
+#
+# NOTE: Do NOT set --sandbox_base under /tmp here — it conflicts with
+# --sandbox_tmpfs_path=/tmp (Bazel refuses to run when the sandbox working
+# directory is below a tmpfs mount point).
+test --noreuse_sandbox_directories
+test --experimental_sandbox_async_tree_delete_idle_threads=0
 
 # ------------------------------------------------------------
 # 6. CACHING 
@@ -124,7 +146,11 @@ build:tsan --linkopt=-fsanitize=thread
 build:tsan --copt=-DTHREAD_SANITIZER
 test:tsan --action_env=TSAN_OPTIONS="history_size=7:halt_on_error=1:detect_deadlocks=1:second_deadlock_stack=1:strict_memcmp=1:report_atomic_races=1:force_seq_cst_atomics=1:exitcode=66:symbolize=1:print_suppressions=1"
 test:tsan --runs_per_test=20
-test:tsan --local_test_jobs=10
+# Keep local_test_jobs low to prevent sandbox directory collisions.
+# With --runs_per_test=20, Bazel creates 20 sandbox instances per target.
+# At concurrency >4, sandbox cleanup can't keep up, causing
+# "Could not copy inputs into sandbox (File exists)" errors.
+test:tsan --local_test_jobs=4
 
 # -- Code Coverage --
 build:coverage --collect_code_coverage
@@ -134,16 +160,26 @@ build:coverage --combined_report=lcov
 # -- MSan: MemorySanitizer --
 # Usage: bazel test --config=msan //...
 # Detects: reads of uninitialized memory.
-# WARNING: MSan requires ALL linked libraries (including libc++) to be
-#   compiled with -fsanitize=memory. If you see false positives from
-#   std::string / std::vector, you must provide an MSan-instrumented
-#   libc++ via: build:msan --linkopt=-stdlib=libc++ (custom build).
+# MSan requires -stdlib=libc++ because the MSan runtime has interceptors
+# for libc++ but NOT for libstdc++.  Without libc++, googletest itself
+# triggers false positives before any DCodeX code runs.
+# Requires: libc++-dev and libc++abi-dev (installed by dcodex-setup.sh).
+#
+# --spawn_strategy=standalone: libc++ headers (e.g. /usr/lib/llvm-19/include/c++/v1/)
+# are not in Bazel's auto-detected cxx_builtin_include_directories (which are
+# detected using libstdc++). The sandbox include validator rejects these as
+# "absolute path inclusion" errors.  Standalone bypasses the sandbox, which is
+# appropriate since MSan inherently depends on system-installed libc++.
 build:msan --config=sanitizer_common
+build:msan --spawn_strategy=standalone
 build:msan --copt=-fsanitize=memory
 build:msan --copt=-fsanitize-memory-track-origins=2
 build:msan --linkopt=-fsanitize=memory
 build:msan --copt=-DMEMORY_SANITIZER
-test:msan --action_env=MSAN_OPTIONS="halt_on_error=1:exitcode=77"
+build:msan --copt=-stdlib=libc++
+build:msan --linkopt=-stdlib=libc++
+build:msan --linkopt=-lc++abi
+test:msan --action_env=MSAN_OPTIONS="halt_on_error=1:exitcode=77:suppressions=.github/workflows/msan_suppressions.txt"
 
 # -- ASan + UBSan: AddressSanitizer + UndefinedBehaviorSanitizer --
 # Usage: bazel test --config=asan //...
