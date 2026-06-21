@@ -182,12 +182,35 @@ else
   # Avoid tzdata interactive prompt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    wget curl gnupg ca-certificates git \
+    wget curl gnupg ca-certificates ca-certificates-java git \
     python3 python3-pip python3-venv python-is-python3 \
     libexpat1 libsqlite3-0 zlib1g \
     binutils-gold \
     2>/dev/null
   ok "Core packages installed"
+
+  # ── Java truststore refresh ──────────────────────────────────────────────
+  # Bazel's embedded JVM uses /etc/ssl/certs/java/cacerts for TLS.
+  # When ca-certificates is upgraded (e.g. 20240203 → 20260601) the PEM
+  # bundle is rebuilt, but the Java keystore is only updated if
+  # ca-certificates-java's update hook runs *after* the new PEMs land.
+  # In Docker/CI the hook sometimes fires before the PEMs are fully in
+  # place, leaving a stale keystore → "PKIX path building failed" when
+  # Bazel fetches from bcr.bazel.build.  Force-regenerate it now.
+  info "Refreshing Java certificate truststore..."
+  if [[ -x /usr/sbin/update-ca-certificates ]]; then
+    update-ca-certificates -f 2>/dev/null || true
+  fi
+  # Directly invoke the Java keystore hook if available (belt-and-suspenders).
+  if [[ -x /etc/ca-certificates/update.d/jks-keystore ]]; then
+    /etc/ca-certificates/update.d/jks-keystore 2>/dev/null || true
+  fi
+  # Verify the keystore exists.
+  if [[ -f /etc/ssl/certs/java/cacerts ]]; then
+    ok "Java truststore refreshed: /etc/ssl/certs/java/cacerts"
+  else
+    warn "Java truststore not found at /etc/ssl/certs/java/cacerts — Bazel registry access may fail"
+  fi
 
   # ── LLVM (clang + lld) ────────────────────────────────────────────────────
   if cmd_exists "clang-${LLVM_VERSION}" && cmd_exists "lld-${LLVM_VERSION}"; then
@@ -350,11 +373,22 @@ cd "${REPO_DIR}"
 
 # Override JVM heap for this machine's available memory.
 # The .bazelrc has M1-tuned 16g; on a Linux CI runner that may OOM the JVM.
+#
+# javax.net.ssl.trustStore: Explicitly point Bazel's JVM at the system-managed
+# Java keystore.  This is the belt-and-suspenders complement to the
+# ca-certificates-java install + keystore refresh in Step 2.  Without it,
+# the JVM may use a bundled (and potentially empty/stale) truststore,
+# causing PKIX validation failures against bcr.bazel.build and other
+# HTTPS registries.
+JAVA_TRUSTSTORE="/etc/ssl/certs/java/cacerts"
 BAZEL_JVM_FLAGS=(
   "--host_jvm_args=-Xmx${BAZEL_MEM_MB}m"
   "--host_jvm_args=-XX:+UseG1GC"
   "--host_jvm_args=-XX:MaxGCPauseMillis=50"
 )
+if [[ -f "${JAVA_TRUSTSTORE}" ]]; then
+  BAZEL_JVM_FLAGS+=("--host_jvm_args=-Djavax.net.ssl.trustStore=${JAVA_TRUSTSTORE}")
+fi
 
 # Build targets. We build the test binary too so incremental test runs are fast.
 BUILD_TARGETS=(
